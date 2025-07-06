@@ -16,8 +16,28 @@ ls tasks/
 grep -r "target-domain" tasks/
 ```
 
-### 2. Website Analysis
-Always run analysis first:
+### 2. Website Analysis (Choose Your Method)
+
+#### Method A: Quick Visual Analysis (RECOMMENDED)
+For fast problem-solving when you need to see the interface:
+
+```bash
+source venv/bin/activate && python analyze_website.py [URL]
+```
+
+**This will:**
+- Take a screenshot you can examine
+- List all clickable elements with their text
+- Provide ready-to-use selectors
+- Save analysis as JSON for reference
+
+**Example usage:**
+```bash
+python analyze_website.py https://evals-gomail.vercel.app/
+```
+
+#### Method B: Detailed Technical Analysis
+For complex websites or when you need specific element data:
 
 ```bash
 source venv/bin/activate && python web_tool.py [URL] --selectors [SELECTORS] --wait-for body
@@ -107,7 +127,12 @@ source venv/bin/activate && python web_tool.py [URL] --selectors [SELECTORS] --w
 
 ### 8. Tool Commands
 
-**Analysis:**
+**Quick Analysis (Screenshots + Element List):**
+```bash
+source venv/bin/activate && python analyze_website.py [URL]
+```
+
+**Detailed Analysis:**
 ```bash
 source venv/bin/activate && python web_tool.py [URL] --selectors [LIST] --wait-for body
 ```
