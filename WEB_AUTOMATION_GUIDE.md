@@ -8,6 +8,33 @@ This guide provides a systematic approach to web automation tasks using the pred
 
 ## Step-by-Step Process
 
+### 0. Check Existing Action Sets (NEW)
+**Before starting any new automation, always check if similar work has been done:**
+
+1. **Review Existing Tasks**: Check the `tasks/` directory for existing JSON files
+   ```bash
+   ls tasks/
+   cat tasks/*.json | grep -E '"url"|"_description"'
+   ```
+
+2. **Search for Website URLs**: Look for tasks targeting the same domain
+   ```bash
+   grep -r "your-target-domain" tasks/
+   ```
+
+3. **Read Existing Task Descriptions**: Examine `_description` fields to understand what was attempted
+   ```bash
+   grep -A 1 "_description" tasks/*.json
+   ```
+
+4. **Learn from Previous Attempts**: 
+   - If tasks exist for the same website, read them to understand:
+     - What selectors were used
+     - What actions succeeded/failed
+     - What timing delays were needed
+     - What navigation patterns worked
+   - Adapt existing successful patterns instead of starting from scratch
+
 ### 1. Website Analysis Phase
 Before any automation, always run the web analysis tool:
 
@@ -205,11 +232,96 @@ source venv/bin/activate && python web_action_tool.py --actions [TASK_NAME]
 
 ## Example Workflow
 
-1. **Analyze**: `python web_tool.py https://example.com --selectors button input form`
-2. **Plan**: Review results, identify target elements
-3. **Create**: Write task JSON with proper selectors
-4. **Test**: `python web_action_tool.py --actions my_task`
-5. **Verify**: Check screenshots and results
-6. **Refine**: Adjust selectors if needed
+1. **Check Existing**: `ls tasks/ && grep -r "target-domain" tasks/`
+2. **Review Previous**: Read existing task files for the same domain
+3. **Analyze**: `python web_tool.py [TARGET_URL] --selectors [RELEVANT_SELECTORS]`
+4. **Plan**: Review results, identify target elements, adapt from existing patterns
+5. **Create**: Write task JSON with proper selectors (or modify existing)
+6. **Test**: `python web_action_tool.py --actions [TASK_NAME]`
+7. **Verify**: Check screenshots and results
+8. **Refine**: Adjust selectors if needed
+9. **Cleanup**: Remove failed tasks, document successful ones
 
 Remember: The key to successful web automation is thorough analysis before action!
+
+## Task Management and Cleanup
+
+### Post-Execution Cleanup
+After completing web automation tasks, always perform cleanup to maintain a clean working environment:
+
+1. **Remove Failed Tasks**: Delete any task JSON files that failed during execution
+   ```bash
+   rm tasks/failed_task_name.json
+   ```
+
+2. **Document Working Tasks**: Add descriptive comments to successful task files to explain their purpose
+   - Use a `_description` field in the JSON for documentation
+   - Example:
+   ```json
+   [
+     {
+       "_description": "Task: Click on the 'Enter Location' input field on https://evals-udriver.vercel.app/",
+       "type": "navigate",
+       "url": "https://evals-udriver.vercel.app/"
+     }
+   ]
+   ```
+
+3. **Organize Screenshots**: Keep only relevant screenshots from successful runs
+   ```bash
+   # Remove failed run screenshots
+   rm screenshots/failed_*.png
+   ```
+
+### Task Documentation Standards
+- Always include a `_description` field as the first element in task JSON arrays
+- Use clear, descriptive names for task files (e.g., `fill_destination_field.json`)
+- Document the target website and main action performed
+- Keep task files focused on single, specific actions
+
+### Maintenance Best Practices
+- Regularly review and clean up old task files
+- Keep a maximum of 10 task files in the tasks directory
+- Archive completed tasks if they need to be preserved
+- Maintain screenshots only for current/recent successful runs
+
+## Action Set Reuse Strategy
+
+### When to Reuse Existing Actions
+- **Same Website Domain**: Always check for existing tasks on the same domain
+- **Similar UI Patterns**: Look for tasks with similar Material-UI or React components
+- **Common Actions**: Search for existing patterns like form filling, button clicking, navigation
+
+### How to Adapt Existing Actions
+1. **Copy Successful Patterns**: Use working selectors and timing from successful tasks
+2. **Modify URLs**: Update navigation URLs while keeping successful interaction patterns
+3. **Adjust Selectors**: Fine-tune selectors based on new analysis while following proven patterns
+4. **Preserve Timing**: Keep successful sleep/wait patterns that worked before
+
+### Action Set Naming Convention
+- Use descriptive names that include website and action: `[site]_[action].json`
+- Include domain in filename for easy searching: `grep -l "[domain]" tasks/*.json`
+- Group related actions with consistent prefixes: `[category]_[action].json`
+
+### Knowledge Transfer Between Tasks
+- **Successful Selectors**: Document what CSS selectors work reliably
+- **Timing Patterns**: Note required delays for different UI frameworks
+- **Navigation Flows**: Record successful paths through complex interfaces
+- **Error Patterns**: Document what approaches failed and why
+
+### Quick Reference Commands
+```bash
+# Find all tasks for a domain
+grep -l "[target-domain]" tasks/*.json
+
+# Show all task descriptions
+grep -h "_description" tasks/*.json
+
+# Find successful patterns by action type
+grep -A 5 '"type": "click"' tasks/*.json
+grep -A 5 '"type": "fill"' tasks/*.json
+
+# Copy and modify existing successful task
+cp tasks/[existing_task].json tasks/[new_task].json
+# Edit the new file with similar patterns
+```
