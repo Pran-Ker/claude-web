@@ -18,8 +18,27 @@ grep -r "target-domain" tasks/
 
 ### 2. Website Analysis (Choose Your Method)
 
-#### Method A: Quick Visual Analysis (RECOMMENDED)
-For fast problem-solving when you need to see the interface:
+#### Method A: Find Elements by Text (FASTEST)
+When you know the text of what you want to click:
+
+```bash
+source venv/bin/activate && python find_by_text.py "text to find" [URL]
+```
+
+**This will:**
+- Find all elements containing that text
+- Provide multiple selector options
+- Give you ready-to-use action code
+- Take reference screenshot
+
+**Example usage:**
+```bash
+python find_by_text.py "Starred" https://evals-gomail.vercel.app/
+python find_by_text.py "Submit" https://example.com/form
+```
+
+#### Method B: Quick Visual Analysis  
+For exploring the interface when you don't know what's available:
 
 ```bash
 source venv/bin/activate && python analyze_website.py [URL]
@@ -36,7 +55,7 @@ source venv/bin/activate && python analyze_website.py [URL]
 python analyze_website.py https://evals-gomail.vercel.app/
 ```
 
-#### Method B: Detailed Technical Analysis
+#### Method C: Detailed Technical Analysis
 For complex websites or when you need specific element data:
 
 ```bash
@@ -126,6 +145,11 @@ source venv/bin/activate && python web_tool.py [URL] --selectors [SELECTORS] --w
 3. Re-analyze if structure changes
 
 ### 8. Tool Commands
+
+**Find by Text (Fastest):**
+```bash
+source venv/bin/activate && python find_by_text.py "text" [URL]
+```
 
 **Quick Analysis (Screenshots + Element List):**
 ```bash
