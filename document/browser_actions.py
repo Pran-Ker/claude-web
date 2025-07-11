@@ -48,19 +48,3 @@ class BrowserActions:
     
     def close(self):
         return self.web.close()
-
-
-# Simple usage
-if __name__ == "__main__":
-    browser = BrowserActions()
-    
-    info = browser.page_info()
-    print(f"Page: {info['title']} - {info['url']}")
-    
-    if browser.has_text("search"):
-        print("Page has search functionality")
-    
-    print("Buttons:", browser.find_buttons())
-    print("Inputs:", browser.find_inputs())
-    
-    browser.close()

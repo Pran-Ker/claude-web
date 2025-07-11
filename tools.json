@@ -1,0 +1,101 @@
+[
+  {
+    "name": "navigate",
+    "description": "Load the given URL in the active tab",
+    "parameters": { 
+      "url": { "type": "string" } 
+    },
+    "implementation": "web.go(url)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.close()\""
+  },
+  {
+    "name": "click",
+    "description": "Click the first element matching selector",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.click(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('selector'); web.close()\"",
+    "fallback": "Coordinate clicking when selector fails"
+  },
+  {
+    "name": "type",
+    "description": "Type text into the element matched by selector",
+    "parameters": {
+      "selector": { "type": "string" },
+      "text": { "type": "string" }
+    },
+    "implementation": "web.fill(selector, text) or web.click(selector); web.type(text)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.fill('selector', 'text'); web.close()\""
+  },
+  {
+    "name": "screenshot",
+    "description": "Take full-page PNG and return the local file path",
+    "parameters": {},
+    "implementation": "web.screenshot('screenshots/filename.png')",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.screenshot('screenshots/debug.png'); web.close()\"",
+    "note": "Use sparingly - only for debugging when DOM inspection fails"
+  },
+  {
+    "name": "key",
+    "description": "Press a keyboard key (Tab, Enter, etc.)",
+    "parameters": {
+      "key": { "type": "string" }
+    },
+    "implementation": "web.key(key)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.key('Tab'); web.close()\"",
+    "common_keys": ["Tab", "Enter", "Escape", "ArrowDown", "ArrowUp"]
+  },
+  {
+    "name": "execute_js",
+    "description": "Execute JavaScript code and return result",
+    "parameters": {
+      "code": { "type": "string" }
+    },
+    "implementation": "web.js(code)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); result = web.js('code'); print(result); web.close()\"",
+    "common_usage": [
+      "document.querySelectorAll('input').length",
+      "document.body.textContent",
+      "window.location.href"
+    ]
+  },
+  {
+    "name": "verify_completion",
+    "description": "Check if task completed successfully",
+    "parameters": {
+      "initial_url": { "type": "string" },
+      "success_keywords": { "type": "array" }
+    },
+    "implementation": "Check URL changes and page content for success indicators",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); final_url = web.js('window.location.href'); page_text = web.js('document.body.textContent.toLowerCase()'); success = any(keyword in page_text for keyword in ['success', 'complete', 'confirmed', 'booked']); print(f'URL changed: {final_url != initial_url}, Success found: {success}'); web.close()\""
+  },
+  {
+    "name": "coordinate_click",
+    "description": "Click at specific x,y coordinates (fallback method)",
+    "parameters": {
+      "x": { "type": "number" },
+      "y": { "type": "number" }
+    },
+    "implementation": "web.cmd('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1})",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.cmd('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': 400, 'y': 200, 'button': 'left', 'clickCount': 1}); web.cmd('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': 400, 'y': 200, 'button': 'left', 'clickCount': 1}); web.close()\"",
+    "when_to_use": "When CSS selectors fail or JavaScript execution fails"
+  },
+  {
+    "name": "wait",
+    "description": "Wait for element to appear or page to load",
+    "parameters": {
+      "selector": { "type": "string", "optional": true },
+      "timeout": { "type": "number", "default": 10 }
+    },
+    "implementation": "web.wait(selector, timeout) or time.sleep(seconds)",
+    "bash_usage": "python3 -c \"import time; time.sleep(3)\" or web.wait('selector', 10)"
+  },
+  {
+    "name": "get_page_info",
+    "description": "Get basic page information for debugging",
+    "parameters": {},
+    "implementation": "web.js('({url: window.location.href, title: document.title, inputCount: document.querySelectorAll(\"input\").length, buttonCount: document.querySelectorAll(\"button\").length})')",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); info = web.js('({url: window.location.href, title: document.title, inputCount: document.querySelectorAll(\\\"input\\\").length, buttonCount: document.querySelectorAll(\\\"button\\\").length})'); print(info); web.close()\""
+  }
+]
