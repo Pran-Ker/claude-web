@@ -205,10 +205,14 @@ success = '/success' in final_url or '/confirm' in final_url
 - No error messages visible
 
 ## Website Cloning
+**Perfect Replica Cloning:** Follow the complete protocol in `clone/CLONING_PROTOCOL.md` for pixel-perfect website replicas.
+
+**Quick Clone:**
 ```bash
 python3 clone/website_cloner.py
 ```
-Simple website content extraction and local file generation.
+
+**Protocol:** When user says "clone [website]", use the systematic approach in `clone/CLONING_PROTOCOL.md` to create exact visual replicas with all assets downloaded locally.
 
 ## Emergency Debugging
 When nothing works:

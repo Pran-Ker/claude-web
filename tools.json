@@ -100,13 +100,14 @@
   },
   {
     "name": "clone_website",
-    "description": "Clone a website to local HTML files",
+    "description": "Create pixel-perfect website replica with all assets",
     "parameters": {
       "url": { "type": "string" },
       "name": { "type": "string" }
     },
-    "implementation": "WebsiteCloner(url, name).clone_website()",
-    "bash_usage": "python3 clone/website_cloner.py",
-    "note": "Simple website cloning with content extraction"
+    "implementation": "Follow clone/CLONING_PROTOCOL.md for systematic high-fidelity cloning",
+    "protocol_file": "clone/CLONING_PROTOCOL.md",
+    "bash_usage": "Use WebTool + WebFetch + Write following the complete protocol",
+    "note": "Perfect replica cloning - not just content extraction"
   }
 ]
