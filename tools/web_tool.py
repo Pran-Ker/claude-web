@@ -74,9 +74,51 @@ class WebTool:
         self.cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": key})
         
     def js(self, code):
-        """Run JavaScript"""
-        result = self.cmd("Runtime.evaluate", {"expression": code})
-        return result["result"]["result"].get("value", None)
+        """Run JavaScript with clear error reporting"""
+        try:
+            result = self.cmd("Runtime.evaluate", {"expression": code})
+            
+            # Check if there's a protocol error
+            if "error" in result:
+                print(f"DevTools Protocol Error: {result['error']}")
+                return None
+                
+            response = result.get("result", {})
+            
+            # Check if JavaScript execution threw an exception
+            if "exceptionDetails" in response:
+                exception = response["exceptionDetails"]
+                error_text = exception.get('text', 'Unknown JavaScript error')
+                line_number = exception.get('lineNumber', 'unknown')
+                print(f"JavaScript Exception at line {line_number}: {error_text}")
+                return None
+            
+            # Get the actual result
+            js_result = response.get("result", {})
+            result_type = js_result.get("type", "undefined")
+            
+            # Handle different result types
+            if result_type == "undefined":
+                print(f"JavaScript returned undefined for: {code[:50]}...")
+                return None
+            elif result_type in ["string", "number", "boolean"]:
+                return js_result.get("value")
+            elif result_type == "object":
+                if js_result.get("subtype") == "null":
+                    return None
+                elif "value" in js_result:
+                    return js_result["value"]
+                else:
+                    print(f"Complex object cannot be serialized. Type: {result_type}, Subtype: {js_result.get('subtype', 'none')}")
+                    return None
+            else:
+                print(f"Unhandled result type: {result_type}")
+                return js_result.get("value", js_result.get("description", None))
+                
+        except Exception as e:
+            print(f"Python Exception in js(): {type(e).__name__}: {e}")
+            return None
+    
         
     def wait(self, selector, timeout=10):
         """Wait for element"""

@@ -129,6 +129,16 @@ if __name__ == "__main__":
     print(f"Use this URL in another Python file to connect via CDP")
     
     try:
-        input("Press Enter to stop the browser...")
+        # Check if running in background (no tty)
+        import os
+        if os.isatty(0):  # stdin is a terminal
+            input("Press Enter to stop the browser...")
+        else:
+            # Running in background, keep alive until killed
+            import threading
+            stop_event = threading.Event()
+            stop_event.wait()
+    except (EOFError, KeyboardInterrupt):
+        pass
     finally:
         browser.stop()

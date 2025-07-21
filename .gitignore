@@ -209,3 +209,6 @@ __marimo__/
 # Web automation artifacts
 tasks/
 screenshots/
+
+# Clone directory folders
+clone/images/

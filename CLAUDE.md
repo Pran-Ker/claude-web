@@ -204,6 +204,12 @@ success = '/success' in final_url or '/confirm' in final_url
 - Form validation passes
 - No error messages visible
 
+## Website Cloning
+```bash
+python3 clone/website_cloner.py
+```
+Simple website content extraction and local file generation.
+
 ## Emergency Debugging
 When nothing works:
 1. Take screenshot: `web.screenshot('screenshots/debug.png')`

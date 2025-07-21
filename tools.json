@@ -97,5 +97,16 @@
     "parameters": {},
     "implementation": "web.js('({url: window.location.href, title: document.title, inputCount: document.querySelectorAll(\"input\").length, buttonCount: document.querySelectorAll(\"button\").length})')",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); info = web.js('({url: window.location.href, title: document.title, inputCount: document.querySelectorAll(\\\"input\\\").length, buttonCount: document.querySelectorAll(\\\"button\\\").length})'); print(info); web.close()\""
+  },
+  {
+    "name": "clone_website",
+    "description": "Clone a website to local HTML files",
+    "parameters": {
+      "url": { "type": "string" },
+      "name": { "type": "string" }
+    },
+    "implementation": "WebsiteCloner(url, name).clone_website()",
+    "bash_usage": "python3 clone/website_cloner.py",
+    "note": "Simple website cloning with content extraction"
   }
 ]
