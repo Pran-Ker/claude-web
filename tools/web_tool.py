@@ -36,7 +36,10 @@ class WebTool:
         time.sleep(2)  # Wait for page load
         
     def click(self, selector):
-        """Click element"""
+        """Click element
+        
+        For debugging element selection issues, see: docs/element_debugging.md
+        """
         doc = self.cmd("DOM.getDocument")
         root = doc["result"]["root"]["nodeId"]
         element = self.cmd("DOM.querySelector", {"nodeId": root, "selector": selector})
@@ -132,9 +135,16 @@ class WebTool:
             time.sleep(0.5)
         return False
         
-    def screenshot(self, filename=None):
-        """Take screenshot"""
-        result = self.cmd("Page.captureScreenshot")
+    def screenshot(self, filename=None, quality=80, format="jpeg"):
+        """Take screenshot with optimized size for AI context"""
+        params = {
+            "format": format,
+            "quality": quality if format == "jpeg" else None
+        }
+        # Remove None values
+        params = {k: v for k, v in params.items() if v is not None}
+        
+        result = self.cmd("Page.captureScreenshot", params)
         data = result["result"]["data"]
         
         if filename:

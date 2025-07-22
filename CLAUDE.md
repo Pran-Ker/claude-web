@@ -19,7 +19,11 @@ python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.co
 
 ### screenshot
 ```bash
+# Optimized for AI context (default: JPEG 80% quality)
 python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.screenshot('screenshots/debug.png'); web.close()"
+
+# High quality when needed
+python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.screenshot('screenshots/debug.png', quality=95); web.close()"
 ```
 
 ### key
