@@ -143,6 +143,7 @@ for i in range(button_count):
 ### During Execution
 - [ ] Use TodoWrite to track progress
 - [ ] One action per bash command
+- [ ] Take screenshots before major actions (form submits, navigation)
 - [ ] Verify each step worked before proceeding
 - [ ] Check for errors after each action
 
@@ -224,3 +225,9 @@ When nothing works:
 2. Check page HTML: `web.js('document.documentElement.outerHTML')`
 3. Try coordinate clicking at common UI locations
 4. Fresh page reload: `web.go(url)` + `time.sleep(3)`
+
+## Advanced Debugging (Only When Standard Methods Fail)
+If basic debugging fails, see specialized docs:
+- `docs/dropdown_navigation.md` - When dropdown selection fails  
+- `docs/form_input_corruption.md` - When text input gets garbled
+- `docs/task_completion_verification.md` - When unsure if task is complete
