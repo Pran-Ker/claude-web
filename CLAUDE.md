@@ -139,6 +139,7 @@ for i in range(button_count):
 - [ ] Understand task goal and expected outcome
 - [ ] Check if browser is already on port 9222
 - [ ] Create screenshots directory if needed: `mkdir -p screenshots`
+- [ ] **Check caching directory for website notes**: `ls caching/` and read any relevant files
 
 ### During Execution
 - [ ] Use TodoWrite to track progress
@@ -152,6 +153,47 @@ for i in range(button_count):
 - [ ] Page contains success indicators (confirmed, booked, etc.)
 - [ ] No error messages visible
 - [ ] Task-specific artifacts present
+- [ ] **Log website learnings**: Save important discoveries to `caching/[website-name].md`
+
+### **MANDATORY: Official Task Evaluation**
+After completing ANY task, you MUST run the official evaluation using the generic evaluation script:
+
+## Direct Evaluation (Recommended)
+```bash
+python3 example/evaluate_task.py TASK_ID "YOUR_ANSWER"
+```
+
+## Legacy Method (Still Works)
+```bash
+python3 -c "
+from example.tasks import evaluate_task
+result = evaluate_task('TASK_ID', 'YOUR_ANSWER')
+print(f'✅ Success: {result[\"success\"]}')
+print(f'📊 Reward: {result[\"reward\"]}') 
+print(f'💬 Message: {result[\"message\"]}')
+if not result['success']:
+    print(f'❌ Error details: {result.get(\"error\", \"Unknown\")}')
+"
+```
+
+**Replace**:
+- `TASK_ID` with the actual task ID (e.g., 'udriver-7', 'dashdish-10')
+- `YOUR_ANSWER` with your extracted result (e.g., "6", "license plate ABC123")
+
+**How Evaluation Works**:
+- **JMESPath Tasks**: Extracts specific values from environment state using queries like `differences.currentTrips.added."6".pickup.name`
+- **LLM Boolean Tasks**: Uses natural language evaluation with rubrics like "Does the answer reflect that six rides were taken in June?"
+- **Ground Truth**: Navigates to `/finish` endpoint to get current environment state
+- **Official agisdk**: Uses the same WebCloneEvaluator as the official benchmark
+
+**Examples**:
+```bash
+# Evaluate udriver-7 (LLM boolean evaluation)
+python3 example/evaluate_task.py udriver-7 "6"
+
+# Evaluate dashdish order (JMESPath evaluation)  
+python3 example/evaluate_task.py dashdish-10 ""
+```
 
 ## Common Patterns
 
@@ -160,31 +202,6 @@ for i in range(button_count):
 # Search for task by ID
 echo "task-id" | python example/tasks.py
 # Returns: {'id': 'task-id', 'goal': 'description', 'website': {...}}
-```
-
-### UDriver/Booking Pattern
-```python
-# 1. Navigate to site
-web.go('https://evals-udriver.vercel.app/')
-
-# 2. Fill pickup location
-web.click('input')
-web.type('Pickup Location')
-web.key('Tab')
-
-# 3. Fill destination
-web.type('Destination')
-web.key('Tab')
-
-# 4. Set time if available
-web.fill('input[type="time"]', '14:00')
-
-# 5. Submit
-web.click('button')
-
-# 6. Verify completion
-final_url = web.js('window.location.href')
-success = '/success' in final_url or '/confirm' in final_url
 ```
 
 ## Never Do This
@@ -208,6 +225,7 @@ success = '/success' in final_url or '/confirm' in final_url
 - Specific completion routes (/success, /confirm, /complete)
 - Form validation passes
 - No error messages visible
+- **MOST IMPORTANT**: Official evaluation returns `success: True`
 
 ## Website Cloning
 **Perfect Replica Cloning:** Follow the complete protocol in `clone/CLONING_PROTOCOL.md` for pixel-perfect website replicas.

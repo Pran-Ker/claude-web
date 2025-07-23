@@ -15,4 +15,3 @@ if __name__ == "__main__":
     task_name = input("Enter task name: ")
     details = get_task_details(task_name)
     print(details)
-    

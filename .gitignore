@@ -212,3 +212,6 @@ screenshots/
 
 # Clone directory folders
 clone/*/
+
+# Caching directory
+caching/
