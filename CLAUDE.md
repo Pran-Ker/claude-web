@@ -137,7 +137,7 @@ for i in range(button_count):
 
 ### Before Starting
 - [ ] Understand task goal and expected outcome
-- [ ] Check if browser is already on port 9222
+- [ ] Check if browser is already on the port assigned
 - [ ] Create screenshots directory if needed: `mkdir -p screenshots`
 - [ ] **Check caching directory for website notes**: `ls caching/` and read any relevant files
 
@@ -156,45 +156,15 @@ for i in range(button_count):
 - [ ] **Log website learnings**: Save important discoveries to `caching/[website-name].md`
 
 ### **MANDATORY: Official Task Evaluation**
-After completing ANY task, you MUST run the official evaluation using the generic evaluation script:
+After completing ANY task, you MUST run the official evaluation and store results:
 
-## Direct Evaluation (Recommended)
 ```bash
 python3 example/evaluate_task.py TASK_ID "YOUR_ANSWER"
 ```
 
-## Legacy Method (Still Works)
-```bash
-python3 -c "
-from example.tasks import evaluate_task
-result = evaluate_task('TASK_ID', 'YOUR_ANSWER')
-print(f'✅ Success: {result[\"success\"]}')
-print(f'📊 Reward: {result[\"reward\"]}') 
-print(f'💬 Message: {result[\"message\"]}')
-if not result['success']:
-    print(f'❌ Error details: {result.get(\"error\", \"Unknown\")}')
-"
+**Store Results:** Save the JSON from /finish endpoint to `evaluations/TASK_ID_timestamp.json`
+
 ```
-
-**Replace**:
-- `TASK_ID` with the actual task ID (e.g., 'udriver-7', 'dashdish-10')
-- `YOUR_ANSWER` with your extracted result (e.g., "6", "license plate ABC123")
-
-**How Evaluation Works**:
-- **JMESPath Tasks**: Extracts specific values from environment state using queries like `differences.currentTrips.added."6".pickup.name`
-- **LLM Boolean Tasks**: Uses natural language evaluation with rubrics like "Does the answer reflect that six rides were taken in June?"
-- **Ground Truth**: Navigates to `/finish` endpoint to get current environment state
-- **Official agisdk**: Uses the same WebCloneEvaluator as the official benchmark
-
-**Examples**:
-```bash
-# Evaluate udriver-7 (LLM boolean evaluation)
-python3 example/evaluate_task.py udriver-7 "6"
-
-# Evaluate dashdish order (JMESPath evaluation)  
-python3 example/evaluate_task.py dashdish-10 ""
-```
-
 ## Common Patterns
 
 ### Task Search Pattern
