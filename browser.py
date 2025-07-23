@@ -3,7 +3,7 @@ import time
 import socket
 import signal
 import atexit
-from typing import Optional
+from typing import Optional, List, Dict
 
 
 class BrowserCDP:
@@ -43,7 +43,7 @@ class BrowserCDP:
             '--disable-features=TranslateUI',
             '--disable-ipc-flooding-protection',
             '--enable-features=NetworkService,NetworkServiceLogging',
-            '--user-data-dir=/tmp/chrome-cdp-session'
+            f'--user-data-dir=/tmp/chrome-cdp-session-{self.port}'
         ]
         
         if self.headless:
@@ -120,25 +120,95 @@ class BrowserCDP:
         return False
 
 
-# Simple usage example
-if __name__ == "__main__":
-    # Start browser and get CDP URL
-    browser = BrowserCDP(port=9222, headless=False)
-    cdp_url = browser.start()
-    print(f"Browser started with CDP at: {cdp_url}")
-    print(f"Use this URL in another Python file to connect via CDP")
+class MultiBrowserManager:
+    """Manage multiple browser instances on different ports"""
     
-    try:
-        # Check if running in background (no tty)
-        import os
-        if os.isatty(0):  # stdin is a terminal
-            input("Press Enter to stop the browser...")
-        else:
-            # Running in background, keep alive until killed
-            import threading
-            stop_event = threading.Event()
-            stop_event.wait()
-    except (EOFError, KeyboardInterrupt):
-        pass
-    finally:
-        browser.stop()
+    def __init__(self):
+        self.browsers: Dict[int, BrowserCDP] = {}
+        atexit.register(self.stop_all)
+    
+    def start_browser(self, port: int, headless: bool = True) -> str:
+        """Start a browser on the specified port"""
+        if port in self.browsers:
+            raise Exception(f"Browser already running on port {port}")
+        
+        browser = BrowserCDP(port=port, headless=headless)
+        cdp_url = browser.start()
+        self.browsers[port] = browser
+        print(f"Started browser on port {port}")
+        return cdp_url
+    
+    def stop_browser(self, port: int):
+        """Stop browser on specified port"""
+        if port in self.browsers:
+            self.browsers[port].stop()
+            del self.browsers[port]
+            print(f"Stopped browser on port {port}")
+    
+    def stop_all(self):
+        """Stop all managed browsers"""
+        for port in list(self.browsers.keys()):
+            self.stop_browser(port)
+    
+    def get_running_ports(self) -> List[int]:
+        """Get list of ports with running browsers"""
+        return list(self.browsers.keys())
+    
+    def is_running(self, port: int) -> bool:
+        """Check if browser is running on port"""
+        return port in self.browsers
+
+
+# Usage examples
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1 and sys.argv[1] == "multi":
+        # Multi-browser example
+        print("Starting multiple browsers...")
+        manager = MultiBrowserManager()
+        
+        # Start browsers on different ports
+        ports = [9222, 9223, 9224]
+        for port in ports:
+            try:
+                cdp_url = manager.start_browser(port, headless=False)
+                print(f"Browser {port}: {cdp_url}")
+            except Exception as e:
+                print(f"Failed to start browser on port {port}: {e}")
+        
+        print(f"Running browsers on ports: {manager.get_running_ports()}")
+        
+        try:
+            import os
+            if os.isatty(0):
+                input("Press Enter to stop all browsers...")
+            else:
+                import threading
+                stop_event = threading.Event()
+                stop_event.wait()
+        except (EOFError, KeyboardInterrupt):
+            pass
+        finally:
+            manager.stop_all()
+    
+    else:
+        # Single browser example (original behavior)
+        browser = BrowserCDP(port=9222, headless=False)
+        cdp_url = browser.start()
+        print(f"Browser started with CDP at: {cdp_url}")
+        print(f"Use this URL in another Python file to connect via CDP")
+        print("Run with 'python browser.py multi' for multi-browser example")
+        
+        try:
+            import os
+            if os.isatty(0):
+                input("Press Enter to stop the browser...")
+            else:
+                import threading
+                stop_event = threading.Event()
+                stop_event.wait()
+        except (EOFError, KeyboardInterrupt):
+            pass
+        finally:
+            browser.stop()
