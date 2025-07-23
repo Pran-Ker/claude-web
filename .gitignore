@@ -215,3 +215,6 @@ clone/*/
 
 # Caching directory
 caching/
+
+# Evaluations directory
+evaluations/

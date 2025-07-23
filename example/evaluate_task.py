@@ -1,33 +1,21 @@
 #!/usr/bin/env python3
 """
-Generic task evaluation script following the agisdk evaluation pattern.
-Supports both JMESPath queries and LLM boolean evaluations for any webclone task.
+Task evaluation script - checks if web automation tasks completed successfully.
 
-HOW THIS WORKS:
-1. Connect to browser on port 9222
-2. Navigate to {task_website}/finish to get environment state JSON
-3. Use official agisdk WebCloneEvaluator to check task completion
-4. Two evaluation types are handled automatically:
-   - JMESPath: Extracts specific values from environment state (most tasks)
-     Example: differences.currentTrips.added."6".pickup.name == "Airport"
-   - LLM Boolean: Uses natural language to evaluate answers (retrieval tasks)
-     Example: "Does the answer reflect that six rides were taken in June?"
-5. Task succeeds only if ALL evaluation criteria pass
+Usage: python3 example/evaluate_task.py <task_id> <answer> [port]
 
-USAGE:
-python3 example/evaluate_task.py <task_id> <answer> [port]
-- For JMESPath tasks: answer can be empty "" (checks environment state)
-- For LLM boolean tasks: provide your extracted answer like "6" or "license ABC123"
-- Optional port parameter (default: 9222)
+Examples:
+- python3 example/evaluate_task.py udriver-7 "6"
+- python3 example/evaluate_task.py dashdish-10 ""
+- python3 example/evaluate_task.py task-123 "answer" 9223
 
-EXAMPLES:
-python3 example/evaluate_task.py udriver-7 "6"        # LLM boolean evaluation (port 9222)
-python3 example/evaluate_task.py dashdish-10 "" 9223  # JMESPath evaluation (port 9223)
-python3 example/evaluate_task.py dashdish-1 "Rest1, Rest2, Rest3" 9223  # Custom port
+Results saved to evaluations/{task_id}_{timestamp}.json
 """
 
 import json
 import sys
+import os
+from datetime import datetime
 from tools.web_tool import WebTool
 from agisdk.REAL.browsergym.webclones.task_config import TaskConfig
 from agisdk.REAL.browsergym.webclones.evaluate import WebCloneEvaluator
@@ -40,6 +28,97 @@ def get_task_details(task_id):
         if task["id"] == task_id:
             return task
     return None
+
+
+def save_evaluation_results(task_id, task_details, env_state_json, evaluation_result):
+    """
+    Save evaluation results and environment state to a timestamped JSON file.
+    
+    Args:
+        task_id: Task identifier
+        task_details: Task configuration from all_tasks
+        env_state_json: Environment state from /finish endpoint
+        evaluation_result: Results from evaluate_task function
+    """
+    try:
+        # Create evaluations directory if it doesn't exist
+        eval_dir = "evaluations"
+        os.makedirs(eval_dir, exist_ok=True)
+        
+        # Generate timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{task_id}_{timestamp}.json"
+        filepath = os.path.join(eval_dir, filename)
+        
+        # Extract criteria results from evaluation info if available
+        criteria_results = []
+        if evaluation_result.get("info") and isinstance(evaluation_result["info"], dict):
+            info = evaluation_result["info"]
+            
+            # Handle both JMESPath and LLM evaluations
+            if "criterion_details" in info:
+                # Structured criterion details
+                for i, criterion in enumerate(info["criterion_details"]):
+                    criteria_results.append({
+                        "criterion": i,
+                        "description": criterion.get("description", ""),
+                        "actual_value": criterion.get("actual_value", ""),
+                        "expected_value": criterion.get("expected_value", ""),
+                        "is_correct": criterion.get("is_correct", False)
+                    })
+            elif "results" in info and isinstance(info["results"], list):
+                # Parse agisdk evaluation results format (handles both lists and tuples)
+                criterion_names = ["correct pickup location", "correct destination", "correct car type"]
+                for i, result in enumerate(info["results"]):
+                    if isinstance(result, (list, tuple)) and len(result) >= 2:
+                        is_correct = result[0]
+                        details = result[1] if isinstance(result[1], dict) else {}
+                        criteria_results.append({
+                            "criterion": i,
+                            "description": criterion_names[i] if i < len(criterion_names) else f"criterion_{i}",
+                            "actual_value": details.get("actual_value", ""),
+                            "expected_value": details.get("expected_value", ""),
+                            "is_correct": is_correct
+                        })
+            else:
+                # Extract from evaluation details if available
+                for key, value in info.items():
+                    if "actual_value" in str(key).lower() or "expected_value" in str(key).lower():
+                        criteria_results.append({
+                            "criterion": key,
+                            "value": value,
+                            "description": f"Evaluation criterion: {key}"
+                        })
+        
+        # Build comprehensive results object
+        results = {
+            "task_id": task_id,
+            "task_goal": task_details.get("goal", "") if task_details else "",
+            "evaluation_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "success": evaluation_result.get("success", False),
+            "reward": evaluation_result.get("reward", 0),
+            "evaluation_message": evaluation_result.get("message", ""),
+            "model_response": evaluation_result.get("model_response", ""),
+            "criteria_results": criteria_results,
+            "environment_state": env_state_json,
+            "evaluation_info": evaluation_result.get("info", {}),
+            "execution_details": {
+                "website_url": task_details.get("website", {}).get("url", "") if task_details else "",
+                "evaluation_method": "agisdk WebCloneEvaluator",
+                "port_used": evaluation_result.get("port", 9222)
+            }
+        }
+        
+        # Save to file
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+        
+        print(f"📊 Results saved to: {filepath}")
+        return filepath
+        
+    except Exception as e:
+        print(f"⚠️  Warning: Could not save results - {str(e)}")
+        return None
 
 
 def evaluate_task(task_id, model_response="", port=9222):
@@ -135,8 +214,8 @@ def evaluate_task(task_id, model_response="", port=9222):
         
         print(f"Evaluation result: {message}, Reward: {reward}")
         
-        # Return structured results
-        return {
+        # Build structured results
+        evaluation_result = {
             "task_id": task_id,
             "model_response": model_response,
             "reward": reward,
@@ -144,8 +223,14 @@ def evaluate_task(task_id, model_response="", port=9222):
             "message": message,
             "info": info,
             "success": reward > 0,
-            "evaluation_time": None
+            "evaluation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "port": port
         }
+        
+        # Save results to file
+        save_evaluation_results(task_id, task_details, env_state_json, evaluation_result)
+        
+        return evaluation_result
         
     except Exception as e:
         return {

@@ -162,8 +162,6 @@ After completing ANY task, you MUST run the official evaluation and store result
 python3 example/evaluate_task.py TASK_ID "YOUR_ANSWER"
 ```
 
-**Store Results:** Save the JSON from /finish endpoint to `evaluations/TASK_ID_timestamp.json`
-
 ```
 ## Common Patterns
 
