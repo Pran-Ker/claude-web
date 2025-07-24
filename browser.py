@@ -192,6 +192,47 @@ if __name__ == "__main__":
         finally:
             manager.stop_all()
     
+    elif len(sys.argv) > 1 and sys.argv[1] == "free":
+        # Start browsers only on free ports
+        print("Starting browsers on available ports...")
+        
+        def is_port_free(port):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                return s.connect_ex(('localhost', port)) != 0
+        
+        ports_to_try = [9222, 9223, 9224, 9225]
+        started_browsers = []
+        
+        for port in ports_to_try:
+            if is_port_free(port):
+                try:
+                    browser = BrowserCDP(port=port, headless=False)
+                    browser.start()
+                    started_browsers.append(browser)
+                    print(f'Started browser on port {port}')
+                except Exception as e:
+                    print(f'Failed to start on port {port}: {e}')
+            else:
+                print(f'Port {port} already in use, skipping')
+        
+        if started_browsers:
+            print(f'Started {len(started_browsers)} browsers')
+            try:
+                import os
+                if os.isatty(0):
+                    input("Press Enter to stop all browsers...")
+                else:
+                    import threading
+                    stop_event = threading.Event()
+                    stop_event.wait()
+            except (EOFError, KeyboardInterrupt):
+                pass
+            finally:
+                for browser in started_browsers:
+                    browser.stop()
+        else:
+            print("No free ports available")
+    
     else:
         # Single browser example (original behavior)
         browser = BrowserCDP(port=9222, headless=False)
@@ -199,6 +240,7 @@ if __name__ == "__main__":
         print(f"Browser started with CDP at: {cdp_url}")
         print(f"Use this URL in another Python file to connect via CDP")
         print("Run with 'python browser.py multi' for multi-browser example")
+        print("Run with 'python browser.py free' to start browsers on available ports")
         
         try:
             import os
