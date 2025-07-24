@@ -9,13 +9,12 @@ Examples:
 - python3 example/evaluate_task.py dashdish-10 ""
 - python3 example/evaluate_task.py task-123 "answer" 9223
 
-Results saved to evaluations/{task_id}_{timestamp}.json
+Results saved to evaluations/{task_id}.json
 """
 
 import json
 import sys
 import os
-from datetime import datetime
 from tools.web_tool import WebTool
 from agisdk.REAL.browsergym.webclones.task_config import TaskConfig
 from agisdk.REAL.browsergym.webclones.evaluate import WebCloneEvaluator
@@ -32,7 +31,7 @@ def get_task_details(task_id):
 
 def save_evaluation_results(task_id, task_details, env_state_json, evaluation_result):
     """
-    Save evaluation results and environment state to a timestamped JSON file.
+    Save evaluation results and environment state to JSON file.
     
     Args:
         task_id: Task identifier
@@ -45,9 +44,8 @@ def save_evaluation_results(task_id, task_details, env_state_json, evaluation_re
         eval_dir = "evaluations"
         os.makedirs(eval_dir, exist_ok=True)
         
-        # Generate timestamp
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{task_id}_{timestamp}.json"
+        # Simple filename without timestamp
+        filename = f"{task_id}.json"
         filepath = os.path.join(eval_dir, filename)
         
         # Extract criteria results from evaluation info if available
@@ -94,7 +92,6 @@ def save_evaluation_results(task_id, task_details, env_state_json, evaluation_re
         results = {
             "task_id": task_id,
             "task_goal": task_details.get("goal", "") if task_details else "",
-            "evaluation_timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "success": evaluation_result.get("success", False),
             "reward": evaluation_result.get("reward", 0),
             "evaluation_message": evaluation_result.get("message", ""),
@@ -223,12 +220,12 @@ def evaluate_task(task_id, model_response="", port=9222):
             "message": message,
             "info": info,
             "success": reward > 0,
-            "evaluation_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "port": port
         }
         
-        # Save results to file
-        save_evaluation_results(task_id, task_details, env_state_json, evaluation_result)
+        # Save results to file only if successful
+        if evaluation_result["success"]:
+            save_evaluation_results(task_id, task_details, env_state_json, evaluation_result)
         
         return evaluation_result
         
