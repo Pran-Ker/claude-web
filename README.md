@@ -1,129 +1,147 @@
 # Web Agent Automation Tool
 
-A Python-based web automation framework using Chrome DevTools Protocol for browser control and task automation.
+A powerful Python-based web automation framework leveraging Chrome DevTools Protocol (CDP) to automate web browsing, perform tasks, clone websites, and test web applications.
 
-## Overview
+---
 
-This tool provides automated web browser control for testing websites, performing tasks, and creating website clones. It connects to Chrome via DevTools Protocol to perform actions like clicking, typing, navigation, and screenshot capture.
+## Features
+- **Automate Web Tasks:**
+  - Navigate websites, interact with elements, fill forms, and execute custom JavaScript.
+  - Automate routine web interactions such as clicking buttons, typing into inputs, and validating actions.
+- **Website Cloning:**
+  - Generate pixel-perfect clones of existing websites.
+  - Automatically download and host all website assets locally.
+  - Preserve responsive design for accurate replication.
+- **Task Management and Verification:**
+  - Execute complex multi-step tasks with built-in verification.
+  - Capture screenshots for debugging and visual verification.
+- **Parallel Task Execution:**
+  - Support for multiple agents running concurrently.
+  - Manage several automation tasks simultaneously for efficient testing and scraping.
+
+---
 
 ## Prerequisites
-
 - Python 3.x
-- Chrome browser
+- Chrome Browser
 - Chrome running with remote debugging enabled
 
-## Setup
+### Setup Chrome with Debugging
 
-1. **Start Chrome with remote debugging:**
-   ```bash
-   # macOS/Linux
-   google-chrome --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=/tmp/chrome-debug
+**macOS/Linux:**
 
-   # Windows
-   chrome.exe --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=%TEMP%\chrome-debug
-   ```
+```bash
+google-chrome --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=/tmp/chrome-debug
+```
 
-2. **Install dependencies:**
-   ```bash
-   pip install requests websocket-client
-   ```
+**Windows:**
 
-## Core Features
+```bash
+chrome.exe --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=%TEMP%\chrome-debug
+```
 
-### Web Actions
-- **Navigate** to URLs
-- **Click** elements using CSS selectors
-- **Type** text into form fields
-- **Take screenshots** for debugging
-- **Execute JavaScript** for complex interactions
-- **Coordinate clicking** as fallback method
+---
 
-### Task Management
-- Automated task execution with verification
-- Screenshot-based debugging
-- Form interaction protocols
-- Success/failure detection
+## Installation
 
-### Website Cloning
-- Create pixel-perfect website replicas
-- Download all assets locally
-- Maintain responsive design
+Install Python dependencies:
 
-## Basic Usage
+```bash
+pip install requests websocket-client
+```
 
-### Quick Start
+---
+
+## Usage Examples
+
+### Basic Automation
+
 ```python
 from tools.web_tool import WebTool
 
-# Connect to browser
 web = WebTool(port=9222)
 web.connect()
 
-# Navigate to a website
 web.go('https://example.com')
-
-# Take a screenshot
 web.screenshot('./screenshots/example.png')
-
-# Click an element
 web.click('button')
-
-# Type in a form field
 web.fill('input[name="email"]', 'user@example.com')
 
-# Execute JavaScript
-result = web.js('document.title')
-print(result)
+title = web.js('document.title')
+print(title)
 
-# Close connection
 web.close()
 ```
 
 ### Command Line Usage
+
+**Navigate:**
+
 ```bash
-# Navigate to a page
 python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://example.com'); web.close()"
+```
 
-# Take a screenshot
+**Screenshot:**
+
+```bash
 python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.screenshot('./screenshots/debug.png'); web.close()"
-
-# Click an element
-python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('button'); web.close()"
 ```
 
-## Project Structure
-
-```
-claude-web/
-├── README.md                    # This file
-├── CLAUDE.md                   # Detailed automation guide
-├── tools/
-│   └── web_tool.py            # Core WebTool class
-├── clone/
-│   ├── CLONING_PROTOCOL.md    # Website cloning guide
-│   └── VIDEO_WEBSITE_GUIDE.md # Video website creation
-├── docs/                      # Advanced debugging guides
-├── example/
-│   ├── tasks.py              # Task management
-│   └── evaluate_task.py      # Task evaluation
-├── screenshots/              # Debug screenshots
-└── caching/                 # Website-specific notes
-```
+---
 
 ## Advanced Features
 
-### Task Automation
-Execute complex multi-step tasks with automatic verification:
-```bash
-# Run task evaluation
-python3 example/evaluate_task.py TASK_ID "ANSWER"
+### Automated Task Execution
 
-# Search tasks by ID
+Run and verify complex tasks automatically:
+
+```bash
+python3 example/evaluate_task.py TASK_ID "EXPECTED_ANSWER"
+```
+
+Search for tasks:
+
+```bash
 echo "task-id" | python example/tasks.py
 ```
 
 ### Website Cloning
-Create perfect replicas of websites:
+
+Clone websites precisely:
+
 ```bash
 python3 clone/website_cloner.py
 ```
+
+---
+
+## Project Structure
+
+```
+web-agent-automation/
+├── README.md                    # This guide
+├── CLAUDE.md                    # Detailed automation instructions
+├── tools/
+│   └── web_tool.py              # Core automation library
+├── clone/
+│   ├── CLONING_PROTOCOL.md      # Website cloning instructions
+│   └── VIDEO_WEBSITE_GUIDE.md   # Special cloning guide for video sites
+├── docs/                        # Debugging and advanced guides
+├── example/
+│   ├── tasks.py                 # Task management
+│   └── evaluate_task.py         # Task verification and evaluation
+├── screenshots/                 # Debugging visuals
+└── caching/                     # Site-specific data caching
+```
+
+---
+
+## Use Cases
+- **Automated Web Testing:** Efficiently validate website functionality.
+- **Web Scraping:** Automate data extraction.
+- **Website Cloning:** Quickly replicate sites for local hosting and testing.
+- **Concurrent Task Handling:** Manage complex workflows with multiple agents running parallel tasks.
+
+---
+
+Enjoy seamless, powerful web automation with minimal setup.
