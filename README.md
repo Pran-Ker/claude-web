@@ -25,6 +25,7 @@ A powerful Python-based web automation framework leveraging Chrome DevTools Prot
 - Python 3.x
 - Chrome Browser
 - Chrome running with remote debugging enabled
+- Playwright (for browser.py automation): `pip install playwright`
 
 ### Setup Chrome with Debugging
 
@@ -91,6 +92,58 @@ python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.co
 
 ## Advanced Features
 
+### Browser Management (browser.py)
+
+The `browser.py` module provides automated Chrome browser management with CDP support:
+
+**Single Browser Instance:**
+```python
+from browser import BrowserCDP
+
+# Start a single browser instance
+browser = BrowserCDP(port=9222, headless=False)
+cdp_url = browser.start()
+print(f"Browser available at: {cdp_url}")
+
+# Use context manager for automatic cleanup
+with BrowserCDP(port=9222) as cdp_url:
+    # Browser automatically starts and stops
+    pass
+```
+
+**Multiple Browser Management:**
+```python
+from browser import MultiBrowserManager
+
+manager = MultiBrowserManager()
+
+# Start browsers on different ports
+manager.start_browser(9222, headless=False)
+manager.start_browser(9223, headless=True)
+
+# Check running browsers
+ports = manager.get_running_ports()  # [9222, 9223]
+
+# Stop specific browser
+manager.stop_browser(9222)
+
+# Stop all browsers
+manager.stop_all()
+```
+
+**Command Line Usage:**
+```bash
+# Start single browser
+python browser.py
+
+# Start multiple browsers
+python browser.py multi
+
+# Start browsers on available ports only
+python browser.py free
+```
+
+
 ### Automated Task Execution
 
 Run and verify complex tasks automatically:
@@ -121,6 +174,7 @@ python3 clone/website_cloner.py
 web-agent-automation/
 ├── README.md                    # This guide
 ├── CLAUDE.md                    # Detailed automation instructions
+├── browser.py                   # Chrome browser management with CDP
 ├── tools/
 │   └── web_tool.py              # Core automation library
 ├── clone/
@@ -143,5 +197,3 @@ web-agent-automation/
 - **Concurrent Task Handling:** Manage complex workflows with multiple agents running parallel tasks.
 
 ---
-
-Enjoy seamless, powerful web automation with minimal setup.
