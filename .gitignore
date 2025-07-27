@@ -212,6 +212,7 @@ screenshots/
 
 # Clone directory folders
 clone/*/
+!clone/car_assets/
 
 # Caching directory
 caching/
