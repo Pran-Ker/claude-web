@@ -217,3 +217,40 @@ If basic debugging fails, see specialized docs:
 - `docs/dropdown_navigation.md` - When dropdown selection fails  
 - `docs/form_input_corruption.md` - When text input gets garbled
 - `docs/task_completion_verification.md` - When unsure if task is complete
+
+
+Browser Launch (CDP)
+
+Start Chrome with the DevTools protocol enabled, then use the printed port with WebTool.
+
+Start
+
+# First free port in range (defaults to 9222–9400), headless
+CDP_HEADLESS=1 python browser.py start
+
+# Specific port (auto-redirects to next free if busy)
+CDP_PORT=9222 python browser.py start
+
+# Multiple browsers across a range
+CDP_COUNT=3 CDP_RANGE=9222-9300 python browser.py start
+
+List
+
+python browser.py list
+# → prints ports like: 9222 9223 9224
+
+Stop
+
+# Stop specific ports
+CDP_PORTS=9222,9223 python browser.py stop
+
+# Stop all started by this tool
+python browser.py stop-all
+
+Connect (example)
+
+python3 -c "from tools.web_tool import WebTool; web=WebTool(port=9222); web.connect(); print(web.js('document.title')); web.close()"
+
+Notes
+	•	If a requested port is busy, the launcher automatically uses the next free port in the configured range.
+	•	Defaults: headless on, port range 9222–9400. Adjust with CDP_HEADLESS and CDP_RANGE.
