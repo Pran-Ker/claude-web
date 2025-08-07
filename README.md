@@ -2,6 +2,8 @@
 
 Connect your cluade code to web action tools, and browsers. Ask it to do what ever you want, and it will be behave like web agent which is better than most out there.
 
+![Minesweeper Demo](Minesweeper-demo.gif)
+
 ---
 ## How to use:
 
