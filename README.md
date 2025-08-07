@@ -1,158 +1,37 @@
-# Web Agent Automation Tool
+# Claude Code as a Web Agent
 
-A powerful Python-based web automation framework leveraging Chrome DevTools Protocol (CDP) to automate web browsing, perform tasks, clone websites, and test web applications.
-
----
-
-## Features
-- **Automate Web Tasks:**
-  - Navigate websites, interact with elements, fill forms, and execute custom JavaScript.
-  - Automate routine web interactions such as clicking buttons, typing into inputs, and validating actions.
-- **Website Cloning:**
-  - Generate pixel-perfect clones of existing websites.
-  - Automatically download and host all website assets locally.
-  - Preserve responsive design for accurate replication.
-- **Task Management and Verification:**
-  - Execute complex multi-step tasks with built-in verification.
-  - Capture screenshots for debugging and visual verification.
-- **Parallel Task Execution:**
-  - Support for multiple agents running concurrently.
-  - Manage several automation tasks simultaneously for efficient testing and scraping.
+Connect your cluade code to web action tools, and browsers. Ask it to do what ever you want, and it will be behave like web agent which is better than most out there.
 
 ---
+## How to use:
 
-## Prerequisites
-- Python 3.x
-- Chrome Browser
-- Chrome running with remote debugging enabled
-- Playwright (for browser.py automation): `pip install playwright`
-
-### Setup Chrome with Debugging
-
-**macOS/Linux:**
+Just ask Claude Code, to set it up. 
 
 ```bash
-google-chrome --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=/tmp/chrome-debug
+python browser.py&  #Spin up a browser
 ```
 
-**Windows:**
-
-```bash
-chrome.exe --remote-debugging-port=9222 --no-first-run --no-default-browser-check --user-data-dir=%TEMP%\chrome-debug
-```
+On another tab, ask Claude Code to go wild on the port 9222.
 
 ---
-
-## Installation
-
-Install Python dependencies:
+## Installation  (⏱ < 1 min)
 
 ```bash
-pip install requests websocket-client
-```
+# 1. Grab the code
+git clone https://github.com/agi-inc/claude-web.git
+cd claude-web
 
+# 2. (Optional) isolate deps
+python -m venv .venv && source .venv/bin/activate   # Windows: .\.venv\Scripts\activate
+
+# 3. Install Python + Playwright deps
+pip install -r requirements.txt
+playwright install    # fetches browser binaries
+```
 ---
 
-## Usage Examples
 
-### Basic Automation
-
-```python
-from tools.web_tool import WebTool
-
-web = WebTool(port=9222)
-web.connect()
-
-web.go('https://example.com')
-web.screenshot('./screenshots/example.png')
-web.click('button')
-web.fill('input[name="email"]', 'user@example.com')
-
-title = web.js('document.title')
-print(title)
-
-web.close()
-```
-
-### Command Line Usage
-
-**Navigate:**
-
-```bash
-python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://example.com'); web.close()"
-```
-
-**Screenshot:**
-
-```bash
-python3 -c "from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.screenshot('./screenshots/debug.png'); web.close()"
-```
-
----
-
-## Advanced Features
-
-### Browser Management (browser.py)
-
-The `browser.py` module provides automated Chrome browser management with CDP support:
-
-**Single Browser Instance:**
-```python
-from browser import BrowserCDP
-
-# Start a single browser instance
-browser = BrowserCDP(port=9222, headless=False)
-cdp_url = browser.start()
-print(f"Browser available at: {cdp_url}")
-
-# Use context manager for automatic cleanup
-with BrowserCDP(port=9222) as cdp_url:
-    # Browser automatically starts and stops
-    pass
-```
-
-**Multiple Browser Management:**
-```python
-from browser import MultiBrowserManager
-
-manager = MultiBrowserManager()
-
-# Start browsers on different ports
-manager.start_browser(9222, headless=False)
-manager.start_browser(9223, headless=True)
-
-# Check running browsers
-ports = manager.get_running_ports()  # [9222, 9223]
-
-# Stop specific browser
-manager.stop_browser(9222)
-
-# Stop all browsers
-manager.stop_all()
-```
-
-**Command Line Usage:**
-```bash
-# Start single browser
-python browser.py
-
-# Start multiple browsers
-python browser.py multi
-
-# Start browsers on available ports only
-python browser.py free
-```
-
-
-### Automated Task Execution
-
-Run and verify complex tasks automatically:
-
-```bash
-python3 example/evaluate_task.py TASK_ID "EXPECTED_ANSWER"
-```
-
-Search for tasks:
+### Search for tasks:
 
 ```bash
 echo "task-id" | python example/tasks.py
@@ -187,13 +66,3 @@ web-agent-automation/
 ├── screenshots/                 # Debugging visuals
 └── caching/                     # Site-specific data caching
 ```
-
----
-
-## Use Cases
-- **Automated Web Testing:** Efficiently validate website functionality.
-- **Web Scraping:** Automate data extraction.
-- **Website Cloning:** Quickly replicate sites for local hosting and testing.
-- **Concurrent Task Handling:** Manage complex workflows with multiple agents running parallel tasks.
-
----
