@@ -159,7 +159,7 @@ for i in range(button_count):
 After completing ANY task, you MUST run the official evaluation and store results:
 
 ```bash
-python3 example/evaluate_task.py TASK_ID "YOUR_ANSWER"
+python3 RealEval/evaluate_task.py TASK_ID "YOUR_ANSWER"
 ```
 
 ```
@@ -168,7 +168,7 @@ python3 example/evaluate_task.py TASK_ID "YOUR_ANSWER"
 ### Task Search Pattern
 ```python
 # Search for task by ID
-echo "task-id" | python example/tasks.py
+echo "task-id" | python RealEval/tasks.py
 # Returns: {'id': 'task-id', 'goal': 'description', 'website': {...}}
 ```
 

@@ -2,12 +2,12 @@
 """
 Task evaluation script - checks if web automation tasks completed successfully.
 
-Usage: python3 example/evaluate_task.py <task_id> <answer> [port]
+Usage: python3 RealEval/evaluate_task.py <task_id> <answer> [port]
 
 Examples:
-- python3 example/evaluate_task.py udriver-7 "6"
-- python3 example/evaluate_task.py dashdish-10 ""
-- python3 example/evaluate_task.py task-123 "answer" 9223
+- python3 RealEval/evaluate_task.py udriver-7 "6"
+- python3 RealEval/evaluate_task.py dashdish-10 ""
+- python3 RealEval/evaluate_task.py task-123 "answer" 9223
 
 Results saved to evaluations/{task_id}.json
 """

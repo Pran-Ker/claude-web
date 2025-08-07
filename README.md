@@ -36,7 +36,7 @@ playwright install    # fetches browser binaries
 ### Search for tasks:
 
 ```bash
-echo "task-id" | python example/tasks.py
+echo "task-id" | python RealEval/tasks.py
 ```
 
 ### Website Cloning
@@ -62,7 +62,7 @@ web-agent-automation/
 │   ├── CLONING_PROTOCOL.md      # Website cloning instructions
 │   └── VIDEO_WEBSITE_GUIDE.md   # Special cloning guide for video sites
 ├── docs/                        # Debugging and advanced guides
-├── example/
+├── RealEval/
 │   ├── tasks.py                 # Task management
 │   └── evaluate_task.py         # Task verification and evaluation
 ├── screenshots/                 # Debugging visuals
