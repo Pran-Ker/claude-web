@@ -12,7 +12,7 @@ Just ask Claude Code, to set it up.
 Or 
 
 ```bash
-CDP_HEADLESS=1 python browser.py start  #Spin up a browser
+CDP_HEADLESS=1 python tools/browser.py start  #Spin up a browser
 ```
 and then run Claude Code on the Port
 
@@ -28,7 +28,7 @@ cd claude-web
 python -m venv .venv && source .venv/bin/activate   
 
 # 3. Install Python + Playwright deps
-pip install -r requirements.txt
+cd tools && uv sync && cd ..
 playwright install    # fetches browser binaries
 ```
 
@@ -38,7 +38,9 @@ playwright install    # fetches browser binaries
 claude-web/
 ├── README.md                    
 ├── CLAUDE.md                    # Detailed automation instructions
-├── browser.py                   # Chrome browser management with CDP
 ├── tools/
+    ├── browser.py               # Chrome browser management with CDP
+    ├── pyproject.toml           # Dependencies (uv format)
+    ├── tools.json               # Tool definitions
     └── web_tool.py              # Core automation library
 ```

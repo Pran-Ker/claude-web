@@ -1,6 +1,6 @@
 # CLAUDE.md - Web Agent Automation Guide
 
-## Core Web Actions (from tools.json)
+## Core Web Actions (from tools/tools.json)
 
 ### navigate
 ```bash
@@ -219,33 +219,44 @@ If basic debugging fails, see specialized docs:
 - `docs/task_completion_verification.md` - When unsure if task is complete
 
 
-Browser Launch (CDP)
+## Package Management
+
+**Dependencies:** Using `uv` with `tools/pyproject.toml` (was `requirements.txt`)
+
+Install dependencies:
+```bash
+cd tools && uv sync
+```
+
+## Browser Launch (CDP)
+
+**Note:** Browser launcher moved to `tools/browser.py` (was `browser.py`)
 
 Start Chrome with the DevTools protocol enabled, then use the printed port with WebTool.
 
 Start
 
 # First free port in range (defaults to 9222–9400), headless
-CDP_HEADLESS=1 python browser.py start
+CDP_HEADLESS=1 python tools/browser.py start
 
 # Specific port (auto-redirects to next free if busy)
-CDP_PORT=9222 python browser.py start
+CDP_PORT=9222 python tools/browser.py start
 
 # Multiple browsers across a range
-CDP_COUNT=3 CDP_RANGE=9222-9300 python browser.py start
+CDP_COUNT=3 CDP_RANGE=9222-9300 python tools/browser.py start
 
 List
 
-python browser.py list
+python tools/browser.py list
 # → prints ports like: 9222 9223 9224
 
 Stop
 
 # Stop specific ports
-CDP_PORTS=9222,9223 python browser.py stop
+CDP_PORTS=9222,9223 python tools/browser.py stop
 
 # Stop all started by this tool
-python browser.py stop-all
+python tools/browser.py stop-all
 
 Connect (example)
 

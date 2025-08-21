@@ -1,0 +1,37 @@
+[project]
+name = "web-agent-tools"
+version = "0.1.0"
+description = "Web automation tools for Claude Code"
+requires-python = ">=3.8"
+dependencies = [
+    "agisdk==0.2.0",
+    "anthropic==0.57.1",
+    "beautifulsoup4==4.13.4",
+    "click==8.2.1",
+    "fastapi==0.116.0",
+    "gymnasium==1.2.0",
+    "httpx==0.28.1",
+    "lxml==6.0.0",
+    "numpy==2.3.1",
+    "openai==1.93.2",
+    "pillow==11.3.0",
+    "playwright==1.53.0",
+    "pydantic==2.11.7",
+    "python-dotenv==1.1.1",
+    "PyYAML==6.0.2",
+    "ray==2.47.1",
+    "requests==2.32.4",
+    "selenium==4.34.2",
+    "tiktoken==0.9.0",
+    "tqdm==4.67.1",
+    "uvicorn==0.35.0",
+    "webdriver-manager==4.0.2",
+    "websockets==15.0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = []
