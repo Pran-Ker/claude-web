@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 
 # ────────────────── configuration ──────────────────
 DEFAULT_PORT = 9222
-DEFAULT_HEADLESS = True
+DEFAULT_HEADLESS = False
 CHROME_PATHS = [
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/usr/bin/google-chrome',
@@ -167,6 +167,7 @@ class BrowserCDP:
         args = [
             chrome,
             f'--remote-debugging-port={self.port}',
+            '--remote-allow-origins=*',
             '--no-first-run',
             '--no-default-browser-check',
             '--user-data-dir=' + USER_DATA_DIR_TEMPLATE.format(port=self.port),
