@@ -1,7 +1,12 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "claude-web-agent"
 version = "0.1.0"
 description = "Simple web automation for Claude Code - Convert any Claude instance into a web agent with one command"
+readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
@@ -60,12 +65,5 @@ Homepage = "https://github.com/agi-inc/claude-web"
 Repository = "https://github.com/agi-inc/claude-web"
 Documentation = "https://github.com/agi-inc/claude-web#readme"
 
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.hatchling.build.targets.wheel]
-packages = ["."]
-
-[tool.uv]
-dev-dependencies = []
+[tool.setuptools.packages.find]
+include = ["tools*"]
