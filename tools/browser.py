@@ -23,6 +23,7 @@ CHROME_PATHS = [
     'chromium'
 ]
 USER_DATA_DIR_TEMPLATE = '/tmp/chrome-cdp-session-{port}'
+PERSISTENT_DATA_DIR = os.path.expanduser('~/.chrome-cdp-profile')
 STARTUP_TIMEOUT = 15  # seconds
 LOG_LEVEL = logging.INFO
 
@@ -151,9 +152,10 @@ def list_pidfile_ports() -> List[int]:
 class BrowserCDP:
     """Single Chrome instance controlled via CDP."""
 
-    def __init__(self, port: int = DEFAULT_PORT, headless: bool = DEFAULT_HEADLESS):
+    def __init__(self, port: int = DEFAULT_PORT, headless: bool = DEFAULT_HEADLESS, profile: Optional[str] = None):
         self.port = port
         self.headless = headless
+        self.profile = profile  # "persist" = ~/.chrome-cdp-profile, path = custom, None = /tmp throwaway
         self.process: Optional[subprocess.Popen] = None
 
     # ────────── public api ──────────
@@ -164,13 +166,20 @@ class BrowserCDP:
         chrome = _which_chrome()
         log.debug(f"Using Chrome at {chrome}")
 
+        if self.profile == 'persist':
+            data_dir = PERSISTENT_DATA_DIR + f'-{self.port}'
+        elif self.profile:
+            data_dir = os.path.expanduser(self.profile)
+        else:
+            data_dir = USER_DATA_DIR_TEMPLATE.format(port=self.port)
+
         args = [
             chrome,
             f'--remote-debugging-port={self.port}',
             '--remote-allow-origins=*',
             '--no-first-run',
             '--no-default-browser-check',
-            '--user-data-dir=' + USER_DATA_DIR_TEMPLATE.format(port=self.port),
+            '--user-data-dir=' + data_dir,
         ]
         if self.headless:
             args.append('--headless=new')
@@ -222,7 +231,7 @@ class MultiBrowserManager:
     def __init__(self):
         self._browsers: Dict[int, BrowserCDP] = {}
 
-    def start(self, port: Optional[int] = None, headless: bool = DEFAULT_HEADLESS) -> str:
+    def start(self, port: Optional[int] = None, headless: bool = DEFAULT_HEADLESS, profile: Optional[str] = None) -> str:
         # Choose a port
         if port is None:
             port = find_free_port()
@@ -235,7 +244,7 @@ class MultiBrowserManager:
         if port in self._browsers:
             raise RuntimeError(f"Browser already running on port {port}")
 
-        browser = BrowserCDP(port, headless)
+        browser = BrowserCDP(port, headless, profile=profile)
         url = browser.start()
         self._browsers[port] = browser
         return url
@@ -273,8 +282,9 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
 
     if cmd == "start":
-        # Env: CDP_PORT=auto|<int>, CDP_COUNT=N, CDP_HEADLESS=1/0, CDP_RANGE=9222-9400
+        # Env: CDP_PORT=auto|<int>, CDP_COUNT=N, CDP_HEADLESS=1/0, CDP_RANGE=9222-9400, CDP_PROFILE=persist|<path>
         headless = _env_bool("CDP_HEADLESS", DEFAULT_HEADLESS)
+        profile = _env("CDP_PROFILE")  # "persist" or a custom path; unset = throwaway /tmp dir
         count = int(_env("CDP_COUNT", "1"))
         range_env = _env("CDP_RANGE")
         if range_env and '-' in range_env:
@@ -293,7 +303,7 @@ if __name__ == "__main__":
             else:
                 try_port = None
             port = find_free_port(preferred=try_port)
-            b = BrowserCDP(port=port, headless=headless)
+            b = BrowserCDP(port=port, headless=headless, profile=profile)
             url = b.start()
             urls.append(url)
             log.info(f"STARTED {url}")
@@ -324,7 +334,7 @@ if __name__ == "__main__":
     else:
         print(
             "Usage:\n"
-            "  python browser.py start    # start one or more browsers (env: CDP_PORT, CDP_COUNT, CDP_HEADLESS, CDP_RANGE)\n"
+            "  python browser.py start    # start one or more browsers (env: CDP_PORT, CDP_COUNT, CDP_HEADLESS, CDP_RANGE, CDP_PROFILE)\n"
             "  python browser.py list     # list ports started by this tool\n"
             "  python browser.py stop     # stop specific ports (eg: CDP_PORTS=9222,9223 python browser.py stop)\n"
             "  python browser.py stop-all # stop all started by this tool\n"
