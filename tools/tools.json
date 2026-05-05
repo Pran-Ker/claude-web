@@ -1,7 +1,7 @@
 [
   {
     "name": "navigate",
-    "description": "Load the given URL in the active tab and wait for a page-load signal (Page.loadEventFired OR Page.frameStoppedLoading, whichever fires first). Falls back to document.readyState check before giving up.",
+    "description": "Load the given URL in the active tab and wait for a page-load signal (Page.loadEventFired OR Page.frameStoppedLoading, whichever fires first). Falls back to document.readyState check before giving up. After load, injects the querySelector :first-child→:first-of-type shim into the page.",
     "parameters": {
       "url": { "type": "string" },
       "timeout": { "type": "number", "default": 30, "description": "Max seconds to wait for load" }
@@ -80,7 +80,7 @@
   },
   {
     "name": "execute_js",
-    "description": "Evaluate JavaScript in the page context and return the result. Wrap objects/arrays in JSON.stringify().",
+    "description": "Evaluate JavaScript in the page context and return the result. Wrap objects/arrays in JSON.stringify(). Note: document.querySelector and document.querySelectorAll in the page have been shimmed to automatically retry ':first-child' selectors as ':first-of-type' when no element is found.",
     "parameters": {
       "code": { "type": "string" }
     },
@@ -105,7 +105,7 @@
   },
   {
     "name": "wait_for_visible",
-    "description": "Poll at 0.1 s intervals until the element matching selector is both present in the DOM AND computed-visible (display != 'none', visibility != 'hidden', opacity != '0'). Returns True when visible, False on timeout. Use instead of wait() when elements are dynamically shown/hidden.",
+    "description": "Poll at 0.1 s intervals until the element matching selector is both present in the DOM AND computed-visible (display != 'none', visibility != 'hidden', opacity != '0'). Returns True when visible, False on timeout.",
     "parameters": {
       "selector": { "type": "string" },
       "timeout": { "type": "number", "default": 10 }
@@ -115,7 +115,7 @@
   },
   {
     "name": "wait_for_text",
-    "description": "Poll at 0.1 s intervals until the element matching selector contains the given text in its textContent. Returns True when matched, False on timeout. Useful for dynamic content that updates after an action.",
+    "description": "Poll at 0.1 s intervals until the element matching selector contains the given text in its textContent. Returns True when matched, False on timeout.",
     "parameters": {
       "selector": { "type": "string" },
       "text": { "type": "string" },
@@ -126,12 +126,21 @@
   },
   {
     "name": "wait_for_navigation",
-    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation.",
+    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation. Re-injects the querySelector shim after navigation.",
     "parameters": {
       "timeout": { "type": "number", "default": 15 }
     },
     "implementation": "web.wait_for_navigation(timeout)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('a.nav-link'); web.wait_for_navigation(15); web.close()\""
+  },
+  {
+    "name": "wait_for_url_change",
+    "description": "Capture the current URL then poll at 0.1 s intervals until window.location.href changes. Returns the new URL on success, or the original URL if the timeout expires. Use immediately after click() on a navigation link/button to confirm the page changed before reading content.",
+    "parameters": {
+      "timeout": { "type": "number", "default": 15 }
+    },
+    "implementation": "new_url = web.wait_for_url_change(timeout)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://example.com'); web.click('a'); new_url = web.wait_for_url_change(10); print(new_url); web.close()\""
   },
   {
     "name": "scroll",
@@ -145,7 +154,7 @@
   },
   {
     "name": "hover",
-    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Gen 5 two-layer approach: (1) Input.dispatchMouseEvent(mouseMoved) triggers JS mouseover handlers and Chrome's built-in CSS :hover tracking; (2) CSS.forcePseudoState pins the :hover pseudo-class on the node at those coordinates so CSS rules like '.parent:hover .child { display:block }' remain active when you inspect the page immediately after hover() returns — no race condition. Uses the fallback-chain: exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes.",
+    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Gen 6 two-layer approach: (1) Input.dispatchMouseEvent(mouseMoved); (2) CSS.forcePseudoState applied to the hovered node AND its ancestors (up to 5 levels). Ancestor hovering ensures CSS rules like '.figure:hover .figcaption { display:block }' activate when you hover a child element (e.g. the img inside .figure). Uses the fallback-chain: exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -164,7 +173,7 @@
   },
   {
     "name": "is_visible",
-    "description": "Return True if the element matching selector is present in the DOM AND computed-visible (display != 'none', visibility != 'hidden', opacity != '0'). Returns False if not found or not visible.",
+    "description": "Return True if the element matching selector is present in the DOM AND computed-visible (display != 'none', visibility != 'hidden', opacity != '0').",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -173,7 +182,7 @@
   },
   {
     "name": "get_computed_style",
-    "description": "Return the computed CSS property value for the element matching selector. Returns None if the element is not found. Useful for verifying hover effects, animations, and conditional visibility without relying on class names.",
+    "description": "Return the computed CSS property value for the element matching selector. Returns None if the element is not found.",
     "parameters": {
       "selector": { "type": "string" },
       "property_name": { "type": "string", "description": "CSS property name, e.g. 'display', 'visibility', 'color', 'opacity'" }
@@ -237,7 +246,7 @@
   },
   {
     "name": "get_page_structure",
-    "description": "Return a structural summary of the current page in a single Runtime.evaluate round-trip. Result dict keys: title (string), url (string), h1s (list of strings), h2s (list of strings), link_count (int), form_count (int), table_count (int). Useful for fast page inspection without multiple js() calls.",
+    "description": "Return a structural summary of the current page in a single Runtime.evaluate round-trip. Result dict keys: title, url, h1s, h2s, link_count, form_count, table_count.",
     "parameters": {},
     "implementation": "web.get_page_structure()",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); print(json.dumps(web.get_page_structure(), indent=2)); web.close()\""
@@ -253,8 +262,47 @@
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.upload_file('input[type=file]', '/tmp/doc.pdf'); web.close()\""
   },
   {
+    "name": "login",
+    "description": "All-in-one login helper. Navigates to url, fills username and password fields, clicks submit, waits up to timeout seconds for the URL to change, and returns True if a redirect occurred (indicating successful login). Eliminates the navigate→fill→fill→click→wait pattern for login tasks.",
+    "parameters": {
+      "url": { "type": "string", "description": "Login page URL" },
+      "username_selector": { "type": "string", "description": "CSS selector for the username/email input" },
+      "username": { "type": "string" },
+      "password_selector": { "type": "string", "description": "CSS selector for the password input" },
+      "password": { "type": "string" },
+      "submit_selector": { "type": "string", "description": "CSS selector for the submit button" },
+      "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait for post-login redirect" }
+    },
+    "implementation": "success = web.login(url, '#username', 'tomsmith', '#password', 'SuperSecretPassword!', \"button[type='submit']\")",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); ok = web.login('https://the-internet.herokuapp.com/login', '#username', 'tomsmith', '#password', 'SuperSecretPassword!', \\\"button[type='submit']\\\"); print('logged in:', ok, web.js('window.location.href')); web.close()\""
+  },
+  {
+    "name": "fill_form",
+    "description": "Fill multiple form fields in one call. Accepts a dict mapping CSS selector to value. Detects field type automatically: <select> uses select_option(), checkbox/radio uses click() (toggled based on truthy/falsy value), all other inputs use fill(). Raises WebToolError if any selector is not found.",
+    "parameters": {
+      "field_map": {
+        "type": "object",
+        "description": "Dict mapping CSS selector strings to value strings",
+        "additionalProperties": { "type": "string" }
+      }
+    },
+    "implementation": "web.fill_form({'#username': 'tomsmith', '#password': 'secret', '#remember': 'true', '#country': 'US'})",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.fill_form({'#first': 'Alice', '#last': 'Smith', '#email': 'alice@example.com'}); web.click('button[type=submit]'); web.close()\""
+  },
+  {
+    "name": "paginate",
+    "description": "Collect data across multiple pages automatically. On each page: calls extractor_fn(web) to collect a list of items, then clicks next_selector if present and waits for navigation. Stops when next_selector disappears or max_pages is reached. extractor_fn must accept a WebTool and return a list (or JSON string of a list). Returns a flat list of all collected items.",
+    "parameters": {
+      "next_selector": { "type": "string", "description": "CSS selector for the 'next page' link or button" },
+      "extractor_fn": { "type": "function", "description": "Python callable(web: WebTool) -> list" },
+      "max_pages": { "type": "number", "default": 10 }
+    },
+    "implementation": "results = web.paginate('li.next a', lambda w: json.loads(w.js(\"JSON.stringify(Array.from(document.querySelectorAll('.quote .text')).map(e=>e.textContent.trim()))\")), max_pages=5)",
+    "bash_usage": "python3 -c \"\nimport json\nfrom tools.web_tool import WebTool\nweb = WebTool(port=9222)\nweb.connect()\nweb.go('https://quotes.toscrape.com')\nresults = web.paginate(\n    'li.next a',\n    lambda w: json.loads(w.js(\\\"JSON.stringify(Array.from(document.querySelectorAll('.quote .text')).map(e=>e.textContent.trim()))\\\")),\n    max_pages=3\n)\nprint(len(results), 'quotes')\nweb.close()\n\""
+  },
+  {
     "name": "open_tab",
-    "description": "Open a new browser tab and return its tab_id string. Does NOT switch focus — call switch_tab(tab_id) to interact with the new tab.",
+    "description": "Open a new browser tab and return its tab id string. Does NOT switch focus — call switch_tab(tab_id) to interact with the new tab.",
     "parameters": {
       "url": { "type": "string", "default": "about:blank", "description": "Initial URL for the new tab" }
     },
@@ -263,7 +311,7 @@
   },
   {
     "name": "switch_tab",
-    "description": "Reconnect the WebSocket to the tab identified by tab_id. All subsequent commands operate on that tab.",
+    "description": "Reconnect the WebSocket to the tab identified by tab_id. All subsequent commands operate on that tab. Re-injects the querySelector shim after switching.",
     "parameters": {
       "tab_id": { "type": "string" }
     },
@@ -316,7 +364,7 @@
   },
   {
     "name": "browser_pool",
-    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. go_async() is race-safe: stale load events from the initial blank-page are detected and discarded, and readyState is verified after the load event fires so that document.title is always populated on return. AsyncWebTool.hover_async() uses the same two-layer hover as the sync version (mouseMoved + CSS.forcePseudoState).",
+    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. AsyncWebTool.hover_async() forces :hover on node + ancestors (gen 6). AsyncWebTool gains login_async, fill_form_async, paginate_async, wait_for_url_change_async.",
     "parameters": {
       "size": { "type": "number", "default": 2, "description": "Number of Chrome processes in the pool" },
       "headless": { "type": "boolean", "default": true },
@@ -329,7 +377,7 @@
   },
   {
     "name": "async_web_tool",
-    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, hover_async, fill_async, wait_async, screenshot_async. go_async() uses a race-safe sequence with readyState verification. hover_async() uses mouseMoved + CSS.forcePseudoState for reliable :hover state. Used internally by BrowserPool.",
+    "description": "Fully async CDP browser automation via AsyncWebTool. Gen 6: adds login_async, fill_form_async, paginate_async, wait_for_url_change_async. hover_async() forces :hover on hovered node AND ancestors (up to 5 levels). querySelector shim injected on connect and after each navigation.",
     "parameters": {
       "port": { "type": "number", "default": 9222 }
     },

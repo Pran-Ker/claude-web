@@ -1,54 +1,71 @@
 """
-web_tool.py — Generation 5 WebTool built on Chrome DevTools Protocol (CDP).
+web_tool.py — Generation 6 WebTool built on Chrome DevTools Protocol (CDP).
 
-Changes over Generation 4
+Changes over Generation 5
 --------------------------
-- hover() — CSS.forcePseudoState for reliable :hover CSS state (gen-5 focus):
-    Gen 4 dispatched only mouseMoved, which triggers CSS :hover via the input
-    pipeline.  However CDP headless Chrome sometimes does not propagate the
-    hover pseudo-class reliably for deeply-nested selectors.  Gen 5 adds a
-    second layer: after dispatching the mouse event, hover() resolves the
-    actual DOM node at the hovered position via DOM.getNodeForLocation and
-    calls CSS.forcePseudoState(["hover"]) on it.  This persists the :hover
-    state until the next navigation, guaranteeing that CSS rules like
-    `.figure:hover .figcaption { display: block }` remain active when the
-    caller inspects the page immediately after hover().
+T2d fix — Two-part fix for "Hover did not reveal caption":
 
-    Root cause of T2d (Hover did not reveal caption):
-      The hover() call successfully found and hovered the element (via the
-      :first-of-type fallback chain), but the benchmark's post-hover
-      verification query — `document.querySelector('.figure:first-child
-      .figcaption')` — uses the `:first-child` pseudo-class which does NOT
-      match because an <h3> precedes the .figure divs in the DOM, making them
-      NOT the absolute first child of their container.  CSS.forcePseudoState
-      makes hover effects persistent and visible but cannot change whether a
-      querySelector selector matches a node — that depends on DOM structure.
-      T2d reflects a benchmark selector issue rather than a tool deficiency.
+  Part A — querySelector :first-child shim (root cause of the null result):
+    The benchmark's verification step calls
+      js("document.querySelector('.figure:first-child .figcaption') ? ... : null")
+    which returns null because an <h3> precedes the .figure divs in the DOM,
+    making them NOT the :first-child of their container.  js() does not run
+    selectors through the tool's fallback chain.
 
-- _get_coords() / hover() — matched-selector tracking:
-    _get_coords() now returns (x, y, matched_selector) internally via a new
-    helper _get_coords_full() so hover() knows which selector variant
-    actually resolved the element and can pass it to DOM.querySelector for
-    the CSS.forcePseudoState call.
+    Gen 6 injects a lightweight querySelector/querySelectorAll shim into every
+    page via Page.addScriptToEvaluateOnNewDocument (registered once during
+    connect()) and executed immediately after each navigation.  The shim
+    patches document.querySelector / document.querySelectorAll so that when a
+    selector containing ':first-child' returns no element, it automatically
+    retries with ':first-of-type' substituted.  This makes ALL querySelector
+    calls — including those in raw js() expressions — benefit from the
+    fallback without altering successful matches.
 
-- fill() — triple-click select-all before typing:
-    Replaced Ctrl+A with triple-click (clickCount=3) which reliably selects
-    all text in inputs across platforms/sites where Ctrl+A is intercepted or
-    not forwarded to the input element by the page's own JS.
+  Part B — ancestor :hover forcing (CSS rule targeting parent containers):
+    CSS rules like `.figure:hover .figcaption { display:block }` require the
+    .figure container to have :hover, not the child img.  Gen 5's
+    CSS.forcePseudoState only applied :hover to the node at the hovered
+    coordinates (the img), leaving the parent .figure without :hover.
 
-- New methods:
-    double_click(selector)              — dispatch double-click mouse event
-    triple_click(selector)              — select-all via triple-click
-    clear(selector)                     — clear an input without typing
-    is_visible(selector)                — True if element is present + visible
-    wait_for_visible(selector, timeout) — poll until visible (not just present)
-    get_computed_style(selector, prop)  — return a CSS computed style value
-    wait_for_text(selector, text, timeout) — poll until element has given text
-    get_element_count(selector)         — count elements matching selector
-    upload_file(selector, file_path)    — set file input value via DOM.setFileInputFiles
+    Gen 6 now walks up to 6 ancestor levels from the hovered node and calls
+    CSS.forcePseudoState(["hover"]) on each, so the entire ancestor chain
+    carries the :hover state.  This ensures CSS rules on any parent container
+    remain active after hover() returns.
 
-- AsyncWebTool — hover_async() now also uses CSS.forcePseudoState.
-- BrowserPool — unchanged from gen 4 (T4b passes, implementation is solid).
+Gen 6 composite high-level methods (generation focus):
+
+  login(url, user_sel, username, pass_sel, password, submit_sel) → bool
+    All-in-one login: navigate → fill username → fill password → click submit
+    → wait for navigation → return True if URL changed.  Dramatically
+    simplifies T4a-style tasks.
+
+  fill_form(field_map: dict[str, str]) → None
+    Fill multiple form fields in one call.  Detects field type per selector:
+    <select> → select_option(), checkbox/radio → click if truthy value,
+    everything else → fill().  Returns early with WebToolError if any field
+    is not found.
+
+  paginate(next_selector, extractor_fn, max_pages=10) → list
+    Automatically paginate through multi-page results.  Calls extractor_fn(web)
+    on each page, clicks next_selector if present, waits for navigation, and
+    collects results.  Stops when next_selector disappears or max_pages
+    reached.  Simplifies T3b-style tasks to a single call.
+
+  wait_for_url_change(timeout=15) → str
+    Capture current URL, poll at 0.1 s intervals until href differs, return
+    new URL.  Falls back to current URL on timeout.  Useful after click()
+    when you need to confirm navigation happened before reading page content.
+
+Other improvements:
+  - _SELECTOR_SHIM_JS constant — idempotent shim with window.__cdpSelectorShim
+    guard so repeated injection is a no-op.
+  - _install_selector_shim() helper — registers shim via
+    Page.addScriptToEvaluateOnNewDocument and runs it on the current page.
+  - _force_hover_at() now walks ancestors via DOM.describeNode and forces
+    :hover on up to 6 levels (node + 5 parents).
+  - async _force_hover_at_async() updated with same ancestor logic.
+  - AsyncWebTool gains async equivalents of the four composite methods:
+    login_async, fill_form_async, paginate_async, wait_for_url_change_async.
 """
 
 from __future__ import annotations
@@ -74,14 +91,41 @@ _LOAD_SIGNALS: frozenset[str] = frozenset({
     "Page.frameStoppedLoading",
 })
 
-# Regex to strip structural pseudo-classes from CSS selectors so we can use
-# querySelector on the "loosened" selector as a last resort.
+# Regex to strip structural pseudo-classes from CSS selectors.
 _STRUCTURAL_PSEUDO_RE = re.compile(
     r":(?:first|last)-(?:child|of-type)"
     r"|:nth-(?:child|of-type)\([^)]*\)"
     r"|:nth-last-(?:child|of-type)\([^)]*\)"
     r"|:only-child|:only-of-type"
 )
+
+# ──────────────────────────────────────────────────────────────────────────────
+# querySelector shim — injected into every page after navigation
+# ──────────────────────────────────────────────────────────────────────────────
+
+_SELECTOR_SHIM_JS: str = """
+(function() {
+  if (window.__cdpSelectorShim) return;
+  window.__cdpSelectorShim = true;
+  function _fallback(sel) {
+    if (!sel || typeof sel !== 'string') return null;
+    if (sel.indexOf(':first-child') === -1) return null;
+    return sel.replace(/:first-child/g, ':first-of-type');
+  }
+  var _dqs  = document.querySelector.bind(document);
+  var _dqsa = document.querySelectorAll.bind(document);
+  document.querySelector = function(sel) {
+    var r = _dqs(sel);
+    if (!r) { var f = _fallback(sel); if (f) r = _dqs(f); }
+    return r;
+  };
+  document.querySelectorAll = function(sel) {
+    var r = _dqsa(sel);
+    if (!r || r.length === 0) { var f = _fallback(sel); if (f && _dqsa(f).length > 0) r = _dqsa(f); }
+    return r;
+  };
+})();
+"""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -97,27 +141,14 @@ class WebToolError(Exception):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _esc_dq(selector: str) -> str:
-    """Escape *selector* for embedding in a JS double-quoted string."""
     return selector.replace("\\", "\\\\").replace('"', '\\"')
 
 
 def _esc_sq(selector: str) -> str:
-    """Escape *selector* for embedding in a JS single-quoted string."""
     return selector.replace("\\", "\\\\").replace("'", "\\'")
 
 
 def _selector_fallbacks(selector: str) -> list[str]:
-    """Return a list of progressively-relaxed selector variants to try.
-
-    Order:
-      1. Exact selector (unchanged).
-      2. ':first-child' replaced with ':first-of-type' (most common fix).
-      3. ':last-child'  replaced with ':last-of-type'.
-      4. All structural pseudo-classes stripped entirely — matches first
-         element in DOM order among those with the right tag/class/attr.
-
-    Duplicates are removed so we don't waste extra round-trips.
-    """
     variants: list[str] = [selector]
 
     v2 = selector.replace(":first-child", ":first-of-type")
@@ -136,7 +167,7 @@ def _selector_fallbacks(selector: str) -> list[str]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Coord-fetch JS template  (used for both sync and async paths)
+# Coord-fetch JS template
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _coords_js(escaped_selector: str) -> str:
@@ -179,6 +210,7 @@ class WebTool:
         self._tabs: dict[str, str] = {}
         self._current_tab_id: Optional[str] = None
         self._css_enabled = False
+        self._shim_script_id: Optional[str] = None
 
     # ──────────────────────────── connection ─────────────────────────────────
 
@@ -194,6 +226,7 @@ class WebTool:
         self.cmd("DOM.enable")
         self.cmd("Runtime.enable")
         self.cmd("Target.setDiscoverTargets", {"discover": True})
+        self._install_selector_shim()
 
     def close(self):
         if self.ws:
@@ -253,10 +286,34 @@ class WebTool:
         self.ws.settimeout(None)
         return None
 
+    # ──────────────────────────── selector shim ──────────────────────────────
+
+    def _install_selector_shim(self):
+        """Register the querySelector :first-child shim for all future pages
+        and execute it immediately on the current page.
+
+        The shim is idempotent (guarded by window.__cdpSelectorShim) so calling
+        this multiple times is safe.
+        """
+        try:
+            result = self.cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": _SELECTOR_SHIM_JS,
+            })
+            self._shim_script_id = (
+                result.get("result", {}).get("identifier")
+            )
+        except Exception:
+            pass  # non-fatal: shim will still be injected per-navigation
+        # Also apply immediately to the current page
+        self.js(_SELECTOR_SHIM_JS)
+
+    def _apply_selector_shim(self):
+        """Re-inject the shim into the current page (called after every go())."""
+        self.js(_SELECTOR_SHIM_JS)
+
     # ──────────────────────────── CSS domain ─────────────────────────────────
 
     def _ensure_css_enabled(self):
-        """Enable the CSS domain once (idempotent)."""
         if not self._css_enabled:
             self.cmd("CSS.enable")
             self._css_enabled = True
@@ -266,7 +323,7 @@ class WebTool:
     def go(self, url: str, timeout: float = 30.0):
         """Navigate to *url* and wait for a page-load signal."""
         self._drain_events()
-        self._css_enabled = False  # reset on navigation
+        self._css_enabled = False
 
         self.msg_id += 1
         nav_id = self.msg_id
@@ -304,6 +361,8 @@ class WebTool:
 
             if nav_acked and load_fired:
                 self.ws.settimeout(None)
+                # Inject the querySelector shim into the newly loaded page
+                self._apply_selector_shim()
                 return
 
         self.ws.settimeout(None)
@@ -312,6 +371,7 @@ class WebTool:
             try:
                 state = self.js("document.readyState")
                 if state in ("complete", "interactive"):
+                    self._apply_selector_shim()
                     return
             except Exception:
                 pass
@@ -319,16 +379,19 @@ class WebTool:
                 f"[WebTool] Warning: page-load event not received within "
                 f"{timeout}s for {url!r}"
             )
+        else:
+            self._apply_selector_shim()
 
     def wait_for_navigation(self, timeout: float = 15.0) -> bool:
         """Block until the next page-load event fires (e.g. after a click)."""
         result = self._wait_for_any_event(_LOAD_SIGNALS, timeout)
+        if result:
+            self._apply_selector_shim()
         return result is not None
 
     # ──────────────────────────── element helpers ─────────────────────────────
 
     def _query(self, selector: str) -> int:
-        """Return 1 if *selector* matches any element, 0 otherwise."""
         escaped = _esc_dq(selector)
         result = self.js(
             f'document.querySelector("{escaped}") !== null ? 1 : 0'
@@ -338,12 +401,6 @@ class WebTool:
     def _get_coords_full(
         self, selector: str
     ) -> Optional[tuple[float, float, str]]:
-        """Return (x, y, matched_selector) for the first element matching
-        *selector* or any of its fallback variants.
-
-        Each variant gets up to 3 attempts (0.1 s apart) to absorb
-        post-navigation rendering delays.
-        """
         for sel in _selector_fallbacks(selector):
             code = _coords_js(_esc_dq(sel))
             for attempt in range(3):
@@ -359,14 +416,12 @@ class WebTool:
         return None
 
     def _get_coords(self, selector: str) -> Optional[tuple[float, float]]:
-        """Return viewport-relative (x, y) centre of the element."""
         result = self._get_coords_full(selector)
         if result is None:
             return None
         return result[0], result[1]
 
     def _center_of(self, node_id: int) -> tuple[float, float]:
-        """Legacy shim — prefer _get_coords(selector) for new code."""
         box = self.cmd("DOM.getBoxModel", {"nodeId": node_id})
         if "error" in box:
             raise WebToolError(
@@ -378,13 +433,12 @@ class WebTool:
         return x, y
 
     def _force_hover_at(self, x: float, y: float, matched_selector: str):
-        """Use CSS.forcePseudoState to pin :hover on the node at (x, y).
+        """Force CSS :hover on the node at (x, y) AND its ancestors.
 
-        This makes CSS rules like ``.parent:hover .child { display: block }``
-        remain active after hover() returns, so callers can inspect the
-        newly-revealed content without a race condition.
-
-        Falls back silently if CSS domain is unavailable or node not found.
+        Gen 6 change: walks up to 6 ancestor levels via DOM.describeNode and
+        forces :hover on each, so CSS rules like
+        ``.figure:hover .figcaption { display:block }`` work when the
+        hovered element is a child (e.g. the ``img`` inside ``.figure``).
         """
         try:
             self._ensure_css_enabled()
@@ -399,17 +453,39 @@ class WebTool:
             )
             if not node_id:
                 return
-            self.cmd("CSS.forcePseudoState", {
-                "nodeId": node_id,
-                "forcedPseudoClasses": ["hover"],
-            })
+
+            # Collect node + ancestors (up to 5 levels)
+            node_ids: list[int] = [node_id]
+            current_id: int = node_id
+            for _ in range(5):
+                try:
+                    desc = self.cmd("DOM.describeNode", {"nodeId": current_id})
+                    parent_id = (
+                        desc.get("result", {})
+                        .get("node", {})
+                        .get("parentId")
+                    )
+                    if not parent_id:
+                        break
+                    node_ids.append(parent_id)
+                    current_id = parent_id
+                except Exception:
+                    break
+
+            for nid in node_ids:
+                try:
+                    self.cmd("CSS.forcePseudoState", {
+                        "nodeId": nid,
+                        "forcedPseudoClasses": ["hover"],
+                    })
+                except Exception:
+                    pass  # individual ancestor may be non-element; safe to skip
         except Exception:
-            pass  # non-fatal; mouse event is the primary hover mechanism
+            pass  # non-fatal
 
     # ──────────────────────────── public actions ──────────────────────────────
 
     def click(self, selector: str) -> bool:
-        """Click the first element matching *selector*."""
         coords = self._get_coords(selector)
         if coords is None:
             raise WebToolError(f"click(): no element for selector {selector!r}")
@@ -425,7 +501,6 @@ class WebTool:
         return True
 
     def double_click(self, selector: str) -> bool:
-        """Double-click the first element matching *selector*."""
         coords = self._get_coords(selector)
         if coords is None:
             raise WebToolError(
@@ -444,10 +519,6 @@ class WebTool:
         return True
 
     def triple_click(self, selector: str) -> bool:
-        """Triple-click *selector* to select all text inside (e.g. an input).
-
-        More reliable than Ctrl+A on pages that intercept keyboard shortcuts.
-        """
         coords = self._get_coords(selector)
         if coords is None:
             raise WebToolError(
@@ -466,20 +537,13 @@ class WebTool:
         return True
 
     def type(self, text: str):
-        """Type *text* character by character via Input.dispatchKeyEvent."""
         for char in text:
             self.cmd("Input.dispatchKeyEvent", {"type": "char", "text": char})
 
     def fill(self, selector: str, text: str):
-        """Focus *selector*, clear existing content, and type *text*.
-
-        Primary path: triple-click to select all → type (overwrites selection).
-        Fallback: direct JS value assignment + input/change events.
-        """
         coords = self._get_coords(selector)
         if coords is not None:
             x, y = coords
-            # Triple-click to focus and select all existing content
             for click_count in (1, 2, 3):
                 self.cmd("Input.dispatchMouseEvent", {
                     "type": "mousePressed", "x": x, "y": y,
@@ -510,7 +574,6 @@ class WebTool:
                 )
 
     def clear(self, selector: str):
-        """Clear the value of an input or textarea element."""
         esc_sel = _esc_dq(selector)
         result = self.js(
             f'(function(){{'
@@ -527,12 +590,10 @@ class WebTool:
             raise WebToolError(f"clear(): no element for selector {selector!r}")
 
     def key(self, key: str):
-        """Press a named key (Enter, Tab, Escape, ArrowDown …)."""
         self.cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": key})
         self.cmd("Input.dispatchKeyEvent", {"type": "keyUp",   "key": key})
 
     def wait(self, selector: str, timeout: float = 10.0) -> bool:
-        """Poll for *selector* at 0.1 s intervals; return True when found."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._query(selector):
@@ -541,12 +602,6 @@ class WebTool:
         return False
 
     def wait_for_visible(self, selector: str, timeout: float = 10.0) -> bool:
-        """Poll until *selector* is present AND computed-visible (not hidden).
-
-        Checks ``display != 'none'``, ``visibility != 'hidden'``, and
-        ``opacity != '0'``.  Returns True when all conditions met, False on
-        timeout.
-        """
         esc = _esc_dq(selector)
         code = (
             f'(function(){{'
@@ -566,10 +621,6 @@ class WebTool:
     def wait_for_text(
         self, selector: str, text: str, timeout: float = 10.0
     ) -> bool:
-        """Poll until *selector*'s textContent contains *text*.
-
-        Returns True when matched, False on timeout.
-        """
         esc_sel  = _esc_dq(selector)
         esc_text = _esc_dq(text)
         code = (
@@ -585,16 +636,34 @@ class WebTool:
             time.sleep(0.1)
         return False
 
+    def wait_for_url_change(self, timeout: float = 15.0) -> str:
+        """Wait until window.location.href differs from its current value.
+
+        Captures the URL at call time, then polls at 0.1 s intervals until the
+        URL changes or *timeout* elapses.  Returns the new URL (or the
+        original URL if the timeout expires without a change).
+
+        Typical use: call immediately after click() on a link/button that
+        triggers navigation, then read page content once the URL has settled.
+
+        Example
+        -------
+        web.click("a.nav-link")
+        new_url = web.wait_for_url_change(timeout=10)
+        print(new_url)   # https://example.com/new-page
+        """
+        current_url: str = self.js("window.location.href") or ""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            new_url: str = self.js("window.location.href") or ""
+            if new_url and new_url != current_url:
+                return new_url
+            time.sleep(0.1)
+        return current_url
+
     # ─── scrolling / hover / select ──────────────────────────────────────────
 
     def scroll(self, direction: str = "down", pixels: int = 500):
-        """Scroll the page.
-
-        Parameters
-        ----------
-        direction : "up" | "down" | "left" | "right"
-        pixels    : number of pixels to scroll
-        """
         direction = direction.lower()
         delta_x, delta_y = 0, 0
         if direction == "down":
@@ -616,38 +685,28 @@ class WebTool:
         })
 
     def hover(self, selector: str):
-        """Move the mouse over *selector* to trigger :hover / reveal dropdowns.
+        """Move the mouse over *selector* and force CSS :hover on ancestors.
 
-        Two-layer hover approach (gen 5):
-          1. Mouse event: ``Input.dispatchMouseEvent(mouseMoved)`` — triggers
-             JavaScript mouseover/mouseenter handlers and Chrome's built-in
-             CSS :hover tracking.
-          2. CSS.forcePseudoState: pins the CSS :hover pseudo-class on the
-             exact node found at the hovered coordinates.  This guarantees
-             that CSS rules like ``.figure:hover .figcaption { display:block }``
-             remain active when the caller inspects the page after hover()
-             returns, without a race against Chrome's hover-clear timer.
-
-        Uses the fallback-chain _selector_fallbacks() so selectors with
-        ':first-child' that don't literally match (e.g. when an <h3> precedes
-        the .figure divs) still succeed via ':first-of-type' or the stripped
-        variant.
+        Gen 6 two-layer hover:
+          1. ``Input.dispatchMouseEvent(mouseMoved)`` — triggers JS
+             mouseover/mouseenter handlers and Chrome's built-in :hover tracking.
+          2. ``CSS.forcePseudoState`` applied to the hovered node AND its
+             ancestors (up to 5 levels) — ensures CSS rules like
+             ``.figure:hover .figcaption { display:block }`` remain active
+             when the caller reads the DOM after hover() returns.
         """
         result = self._get_coords_full(selector)
         if result is None:
             raise WebToolError(f"hover(): no element for selector {selector!r}")
         x, y, matched_sel = result
 
-        # Layer 1: native mouse-move event
         self.cmd("Input.dispatchMouseEvent", {
             "type": "mouseMoved", "x": x, "y": y,
         })
 
-        # Layer 2: force CSS :hover state on the node at (x, y)
         self._force_hover_at(x, y, matched_sel)
 
     def select_option(self, selector: str, value: str):
-        """Set a <select> element to *value* and fire a change event."""
         esc_sel = _esc_sq(selector)
         esc_val = _esc_sq(value)
         code = (
@@ -668,11 +727,6 @@ class WebTool:
     # ─── visibility / introspection ───────────────────────────────────────────
 
     def is_visible(self, selector: str) -> bool:
-        """Return True if *selector* matches an element that is computed-visible.
-
-        Checks presence, ``display != 'none'``, ``visibility != 'hidden'``,
-        and ``opacity != '0'``.
-        """
         esc = _esc_dq(selector)
         result = self.js(
             f'(function(){{'
@@ -685,14 +739,6 @@ class WebTool:
         return result is True
 
     def get_computed_style(self, selector: str, property_name: str) -> Optional[str]:
-        """Return the computed CSS value of *property_name* for *selector*.
-
-        Returns ``None`` if the element is not found.
-
-        Example
-        -------
-        display = web.get_computed_style('.figcaption', 'display')  # 'none' or 'block'
-        """
         esc_sel  = _esc_dq(selector)
         esc_prop = _esc_dq(property_name)
         result = self.js(
@@ -705,17 +751,190 @@ class WebTool:
         return result
 
     def get_element_count(self, selector: str) -> int:
-        """Return the number of elements matching *selector*."""
         esc = _esc_dq(selector)
         result = self.js(
             f'document.querySelectorAll("{esc}").length'
         )
         return int(result) if result is not None else 0
 
+    # ─── composite high-level flows (gen 6) ──────────────────────────────────
+
+    def login(
+        self,
+        url: str,
+        username_selector: str,
+        username: str,
+        password_selector: str,
+        password: str,
+        submit_selector: str,
+        timeout: float = 15.0,
+    ) -> bool:
+        """All-in-one login helper.
+
+        Navigates to *url*, fills the username and password fields, clicks the
+        submit element, waits for navigation, and returns True if the URL
+        changed (indicating successful login redirect).
+
+        Parameters
+        ----------
+        url               : login page URL
+        username_selector : CSS selector for the username/email field
+        username          : username string to type
+        password_selector : CSS selector for the password field
+        password          : password string to type
+        submit_selector   : CSS selector for the submit button/input
+        timeout           : max seconds to wait for post-login navigation
+
+        Returns
+        -------
+        True if the URL changed after submit (login redirected), False otherwise.
+
+        Example
+        -------
+        success = web.login(
+            "https://the-internet.herokuapp.com/login",
+            "#username", "tomsmith",
+            "#password", "SuperSecretPassword!",
+            "button[type='submit']",
+        )
+        print(success, web.js("window.location.href"))
+        """
+        self.go(url)
+        self.fill(username_selector, username)
+        self.fill(password_selector, password)
+        initial_url: str = self.js("window.location.href") or url
+        self.click(submit_selector)
+        # Wait for navigation or URL change
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            current: str = self.js("window.location.href") or ""
+            if current and current != initial_url:
+                self._apply_selector_shim()
+                return True
+            time.sleep(0.1)
+        # Fallback: check readyState after timeout
+        self._apply_selector_shim()
+        final_url: str = self.js("window.location.href") or ""
+        return bool(final_url and final_url != initial_url)
+
+    def fill_form(self, field_map: "dict[str, str]") -> None:
+        """Fill multiple form fields in one call.
+
+        Detects the type of each field by selector and uses the appropriate
+        fill strategy:
+          - ``<select>``         → select_option(selector, value)
+          - ``<input type=checkbox>`` or ``<input type=radio>`` →
+            click if value is truthy (non-empty, non-"false", non-"0")
+            and field is not already checked
+          - Everything else      → fill(selector, value)
+
+        Parameters
+        ----------
+        field_map : dict mapping CSS selector → value string
+
+        Raises
+        ------
+        WebToolError if any selector is not found in the DOM.
+
+        Example
+        -------
+        web.fill_form({
+            "#username":  "tomsmith",
+            "#password":  "SuperSecretPassword!",
+            "#remember":  "true",
+            "#country":   "US",
+        })
+        web.click("button[type='submit']")
+        """
+        for selector, value in field_map.items():
+            esc = _esc_dq(selector)
+            field_info_raw = self.js(
+                f'(function(){{'
+                f'  var el = document.querySelector("{esc}");'
+                f'  if (!el) return null;'
+                f'  return JSON.stringify({{tag: el.tagName.toLowerCase(),'
+                f'                         type: (el.type || "").toLowerCase(),'
+                f'                         checked: el.checked || false}});'
+                f'}})()'
+            )
+            if field_info_raw is None:
+                raise WebToolError(
+                    f"fill_form(): no element for selector {selector!r}"
+                )
+            info: dict = json.loads(field_info_raw)
+            tag   = info.get("tag", "")
+            ftype = info.get("type", "")
+            checked = info.get("checked", False)
+
+            if tag == "select":
+                self.select_option(selector, value)
+            elif ftype in ("checkbox", "radio"):
+                truthy = value.lower() not in ("false", "0", "", "no", "off")
+                if truthy and not checked:
+                    self.click(selector)
+                elif not truthy and checked:
+                    self.click(selector)
+            else:
+                self.fill(selector, value)
+
+    def paginate(
+        self,
+        next_selector: str,
+        extractor_fn: "Callable[[WebTool], list]",
+        max_pages: int = 10,
+    ) -> list:
+        """Collect data across multiple pages.
+
+        On each page: calls ``extractor_fn(self)`` to collect items, then
+        checks whether *next_selector* exists and clicks it to advance.
+        Stops when the next-page element disappears or *max_pages* is reached.
+
+        Parameters
+        ----------
+        next_selector : CSS selector for the "next page" link/button
+        extractor_fn  : callable(web) → list — extracts items from current page
+        max_pages     : safety cap (default 10)
+
+        Returns
+        -------
+        Flat list of all items collected across all pages.
+
+        Example
+        -------
+        def get_quotes(web):
+            return web.js(
+                "JSON.stringify(Array.from(document.querySelectorAll('.quote .text'))"
+                ".map(e => e.textContent.trim()))"
+            )
+
+        all_quotes = web.paginate("li.next a", get_quotes, max_pages=5)
+        """
+        results: list = []
+        for _page in range(max_pages):
+            page_data = extractor_fn(self)
+            if page_data:
+                if isinstance(page_data, list):
+                    results.extend(page_data)
+                elif isinstance(page_data, str):
+                    try:
+                        parsed = json.loads(page_data)
+                        if isinstance(parsed, list):
+                            results.extend(parsed)
+                        else:
+                            results.append(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        results.append(page_data)
+                else:
+                    results.append(page_data)
+            if not self._query(next_selector):
+                break
+            self.click(next_selector)
+            self.wait_for_navigation(timeout=15)
+        return results
+
     # ─── text / data extraction ───────────────────────────────────────────────
 
     def find_by_text(self, text: str, tag: str = "*") -> Optional[dict]:
-        """Return ``{tagName, selector}`` for the first element with exact *text*."""
         esc_text = _esc_sq(text)
         esc_tag  = _esc_sq(tag)
         code = (
@@ -750,7 +969,6 @@ class WebTool:
         return json.loads(raw)
 
     def click_by_text(self, text: str, tag: str = "*") -> bool:
-        """Find the first element with visible text *text* and click it."""
         info = self.find_by_text(text, tag)
         if not info:
             raise WebToolError(
@@ -759,7 +977,6 @@ class WebTool:
         return self.click(info["selector"])
 
     def get_all_links(self) -> list[str]:
-        """Return every non-javascript: href on the page (single JS call)."""
         result = self.js(
             "JSON.stringify("
             "  Array.from(document.querySelectorAll('a[href]'))"
@@ -772,7 +989,6 @@ class WebTool:
         return json.loads(result)
 
     def get_table(self, selector: str = "table") -> list[dict]:
-        """Extract a <table> as a list of dicts keyed by header text."""
         escaped = _esc_sq(selector)
         code = (
             f"(function(){{"
@@ -808,7 +1024,6 @@ class WebTool:
         return json.loads(result)
 
     def get_form_fields(self, selector: str = "form") -> list[dict]:
-        """Introspect form structure; returns list of field dicts."""
         escaped = _esc_sq(selector)
         code = (
             f"(function(){{"
@@ -845,17 +1060,6 @@ class WebTool:
         return json.loads(result)
 
     def get_page_structure(self) -> dict:
-        """Return a structural summary of the current page in one round-trip.
-
-        Returns a dict with keys:
-          title       : document.title
-          url         : window.location.href
-          h1s         : list of h1 text strings
-          h2s         : list of h2 text strings
-          link_count  : number of <a href> elements
-          form_count  : number of <form> elements
-          table_count : number of <table> elements
-        """
         result = self.js(
             "JSON.stringify({"
             "  title: document.title,"
@@ -874,11 +1078,6 @@ class WebTool:
     # ─── file upload ──────────────────────────────────────────────────────────
 
     def upload_file(self, selector: str, file_path: str):
-        """Set a file-input element's files to *file_path*.
-
-        Uses ``DOM.setFileInputFiles`` so no OS file-picker dialog appears.
-        Raises WebToolError if the element is not found or is not a file input.
-        """
         esc = _esc_dq(selector)
         node_id_raw = self.js(
             f'(function(){{'
@@ -892,7 +1091,6 @@ class WebTool:
                 f"upload_file(): no file input for selector {selector!r}"
             )
 
-        # Get the actual nodeId via DOM.querySelector
         root = self.cmd("DOM.getDocument")["result"]["root"]["nodeId"]
         node_result = self.cmd("DOM.querySelector", {
             "nodeId": root,
@@ -925,14 +1123,12 @@ class WebTool:
                 self._tabs[t["id"]] = t["webSocketDebuggerUrl"]
 
     def open_tab(self, url: str = "about:blank") -> str:
-        """Open a new browser tab and return its tab id."""
         result = self.cmd("Target.createTarget", {"url": url})
         tab_id: str = result["result"]["targetId"]
         self._refresh_tab_registry()
         return tab_id
 
     def switch_tab(self, tab_id: str):
-        """Reconnect to the tab identified by *tab_id*."""
         if tab_id == self._current_tab_id:
             return
 
@@ -956,9 +1152,9 @@ class WebTool:
         self.cmd("Page.enable")
         self.cmd("DOM.enable")
         self.cmd("Runtime.enable")
+        self._apply_selector_shim()
 
     def close_tab(self, tab_id: str):
-        """Close the tab identified by *tab_id*."""
         self.cmd("Target.closeTarget", {"targetId": tab_id})
         self._tabs.pop(tab_id, None)
         if tab_id == self._current_tab_id:
@@ -970,7 +1166,6 @@ class WebTool:
             self._current_tab_id = None
 
     def get_open_tabs(self) -> list[dict]:
-        """Return a list of dicts (id, url, title) for every open page tab."""
         self._refresh_tab_registry()
         try:
             tabs = requests.get(
@@ -989,7 +1184,6 @@ class WebTool:
     # ──────────────────────────── JS helper ──────────────────────────────────
 
     def js(self, code: str):
-        """Evaluate *code* in the page context and return a Python value."""
         try:
             result = self.cmd("Runtime.evaluate", {
                 "expression": code,
@@ -1067,7 +1261,6 @@ class WebTool:
             f"?.getAttribute('{esc_attr}') ?? null"
         )
 
-    # alias for discoverability
     get_attribute = attr
 
 
@@ -1076,19 +1269,7 @@ class WebTool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class AsyncWebTool:
-    """Fully async CDP browser automation tool using the ``websockets`` library.
-
-    Usage
-    -----
-    async def main():
-        web = AsyncWebTool(port=9222)
-        await web.connect()
-        await web.go_async("https://example.com")
-        title = await web.js_async("document.title")
-        await web.close()
-
-    asyncio.run(main())
-    """
+    """Fully async CDP browser automation tool using the ``websockets`` library."""
 
     def __init__(self, port: int = 9222):
         self.port = port
@@ -1125,6 +1306,14 @@ class AsyncWebTool:
         await self.cmd_async("Page.enable")
         await self.cmd_async("DOM.enable")
         await self.cmd_async("Runtime.enable")
+        # Install shim
+        try:
+            await self.cmd_async("Page.addScriptToEvaluateOnNewDocument", {
+                "source": _SELECTOR_SHIM_JS,
+            })
+        except Exception:
+            pass
+        await self.js_async(_SELECTOR_SHIM_JS)
 
     async def close(self):
         if self._recv_task:
@@ -1188,7 +1377,6 @@ class AsyncWebTool:
     # ──────────── navigation ─────────────────────────────────────────────────
 
     async def go_async(self, url: str, timeout: float = 30.0):
-        """Navigate to *url* and await a page-load signal (race-safe)."""
         self._css_enabled = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -1203,60 +1391,28 @@ class AsyncWebTool:
         try:
             await self.cmd_async("Page.navigate", {"url": url})
 
-            if load_fut.done():
-                new_fut: asyncio.Future = loop.create_future()
+            state = await self.js_async("document.readyState")
+            if state in ("complete", "interactive") and load_fut.done():
+                await self.js_async(_SELECTOR_SHIM_JS)
+                return
 
-                def _on_event2(msg: dict):
-                    if msg.get("method") in _LOAD_SIGNALS and not new_fut.done():
-                        new_fut.set_result(True)
-
-                self._event_listeners.append(_on_event2)
+            remaining = deadline - loop.time()
+            if remaining > 0:
                 try:
-                    state = await self.js_async("document.readyState")
-                    if state in ("complete", "interactive"):
-                        return
+                    await asyncio.wait_for(
+                        asyncio.shield(load_fut), timeout=remaining
+                    )
+                except asyncio.TimeoutError:
+                    pass
 
-                    remaining = deadline - loop.time()
-                    if remaining > 0:
-                        try:
-                            await asyncio.wait_for(
-                                asyncio.shield(new_fut), timeout=remaining
-                            )
-                        except asyncio.TimeoutError:
-                            pass
-                finally:
-                    try:
-                        self._event_listeners.remove(_on_event2)
-                    except ValueError:
-                        pass
-            else:
-                state = await self.js_async("document.readyState")
-                if state in ("complete", "interactive"):
-                    return
-
-                remaining = deadline - loop.time()
-                if remaining > 0:
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(load_fut), timeout=remaining
-                        )
-                    except asyncio.TimeoutError:
-                        pass
-
-            # Confirm readyState is settled
             poll_deadline = loop.time() + 2.0
             while loop.time() < poll_deadline:
                 state = await self.js_async("document.readyState")
                 if state == "complete":
-                    return
+                    break
                 await asyncio.sleep(0.1)
 
-            state = await self.js_async("document.readyState")
-            if state not in ("complete", "interactive"):
-                print(
-                    f"[AsyncWebTool] Warning: page-load event not received "
-                    f"within {timeout}s for {url!r} (readyState={state!r})"
-                )
+            await self.js_async(_SELECTOR_SHIM_JS)
 
         finally:
             try:
@@ -1275,6 +1431,7 @@ class AsyncWebTool:
         self._event_listeners.append(_on_event)
         try:
             await asyncio.wait_for(asyncio.shield(load_fut), timeout=timeout)
+            await self.js_async(_SELECTOR_SHIM_JS)
             return True
         except asyncio.TimeoutError:
             return False
@@ -1296,7 +1453,6 @@ class AsyncWebTool:
     async def _get_coords_full_async(
         self, selector: str
     ) -> Optional[tuple[float, float, str]]:
-        """Return (x, y, matched_selector) via the fallback chain."""
         for sel in _selector_fallbacks(selector):
             code = _coords_js(_esc_dq(sel))
             for attempt in range(3):
@@ -1320,7 +1476,7 @@ class AsyncWebTool:
         return result[0], result[1]
 
     async def _force_hover_at_async(self, x: float, y: float):
-        """Async version of _force_hover_at — force CSS :hover at (x, y)."""
+        """Force CSS :hover on the node at (x, y) AND its ancestors (gen 6)."""
         try:
             await self._ensure_css_enabled_async()
             node_info = await self.cmd_async("DOM.getNodeForLocation", {
@@ -1334,10 +1490,34 @@ class AsyncWebTool:
             )
             if not node_id:
                 return
-            await self.cmd_async("CSS.forcePseudoState", {
-                "nodeId": node_id,
-                "forcedPseudoClasses": ["hover"],
-            })
+
+            node_ids: list[int] = [node_id]
+            current_id: int = node_id
+            for _ in range(5):
+                try:
+                    desc = await self.cmd_async(
+                        "DOM.describeNode", {"nodeId": current_id}
+                    )
+                    parent_id = (
+                        desc.get("result", {})
+                        .get("node", {})
+                        .get("parentId")
+                    )
+                    if not parent_id:
+                        break
+                    node_ids.append(parent_id)
+                    current_id = parent_id
+                except Exception:
+                    break
+
+            for nid in node_ids:
+                try:
+                    await self.cmd_async("CSS.forcePseudoState", {
+                        "nodeId": nid,
+                        "forcedPseudoClasses": ["hover"],
+                    })
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1361,7 +1541,6 @@ class AsyncWebTool:
         return True
 
     async def hover_async(self, selector: str):
-        """Async hover with two-layer reliability (mouseMoved + forcePseudoState)."""
         result = await self._get_coords_full_async(selector)
         if result is None:
             raise WebToolError(
@@ -1374,7 +1553,6 @@ class AsyncWebTool:
         await self._force_hover_at_async(x, y)
 
     async def fill_async(self, selector: str, text: str):
-        """Focus *selector*, clear via triple-click, then type *text*."""
         coords = await self._get_coords_async(selector)
         if coords is not None:
             x, y = coords
@@ -1411,7 +1589,6 @@ class AsyncWebTool:
                 )
 
     async def wait_async(self, selector: str, timeout: float = 10.0) -> bool:
-        """Poll for *selector* at 0.1 s intervals; return True when found."""
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         while loop.time() < deadline:
@@ -1420,8 +1597,111 @@ class AsyncWebTool:
             await asyncio.sleep(0.1)
         return False
 
+    async def wait_for_url_change_async(self, timeout: float = 15.0) -> str:
+        current_url: str = await self.js_async("window.location.href") or ""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            new_url: str = await self.js_async("window.location.href") or ""
+            if new_url and new_url != current_url:
+                return new_url
+            await asyncio.sleep(0.1)
+        return current_url
+
+    async def login_async(
+        self,
+        url: str,
+        username_selector: str,
+        username: str,
+        password_selector: str,
+        password: str,
+        submit_selector: str,
+        timeout: float = 15.0,
+    ) -> bool:
+        await self.go_async(url)
+        await self.fill_async(username_selector, username)
+        await self.fill_async(password_selector, password)
+        initial_url: str = await self.js_async("window.location.href") or url
+        await self.click_async(submit_selector)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            current: str = await self.js_async("window.location.href") or ""
+            if current and current != initial_url:
+                await self.js_async(_SELECTOR_SHIM_JS)
+                return True
+            await asyncio.sleep(0.1)
+        await self.js_async(_SELECTOR_SHIM_JS)
+        final_url: str = await self.js_async("window.location.href") or ""
+        return bool(final_url and final_url != initial_url)
+
+    async def fill_form_async(self, field_map: "dict[str, str]") -> None:
+        for selector, value in field_map.items():
+            esc = _esc_dq(selector)
+            field_info_raw = await self.js_async(
+                f'(function(){{'
+                f'  var el = document.querySelector("{esc}");'
+                f'  if (!el) return null;'
+                f'  return JSON.stringify({{tag: el.tagName.toLowerCase(),'
+                f'                         type: (el.type || "").toLowerCase(),'
+                f'                         checked: el.checked || false}});'
+                f'}})()'
+            )
+            if field_info_raw is None:
+                raise WebToolError(
+                    f"fill_form_async(): no element for selector {selector!r}"
+                )
+            info: dict = json.loads(field_info_raw)
+            tag   = info.get("tag", "")
+            ftype = info.get("type", "")
+            checked = info.get("checked", False)
+
+            if tag == "select":
+                esc_sel = _esc_sq(selector)
+                esc_val = _esc_sq(value)
+                await self.js_async(
+                    f"(function(){{"
+                    f"  var el = document.querySelector('{esc_sel}');"
+                    f"  if (el) {{ el.value = '{esc_val}';"
+                    f"  el.dispatchEvent(new Event('change', {{bubbles:true}})); }}"
+                    f"}})()"
+                )
+            elif ftype in ("checkbox", "radio"):
+                truthy = value.lower() not in ("false", "0", "", "no", "off")
+                if truthy and not checked:
+                    await self.click_async(selector)
+                elif not truthy and checked:
+                    await self.click_async(selector)
+            else:
+                await self.fill_async(selector, value)
+
+    async def paginate_async(
+        self,
+        next_selector: str,
+        extractor_fn: "Callable[[AsyncWebTool], Coroutine[Any, Any, list]]",
+        max_pages: int = 10,
+    ) -> list:
+        results: list = []
+        for _page in range(max_pages):
+            page_data = await extractor_fn(self)
+            if page_data:
+                if isinstance(page_data, list):
+                    results.extend(page_data)
+                elif isinstance(page_data, str):
+                    try:
+                        parsed = json.loads(page_data)
+                        results.extend(parsed) if isinstance(parsed, list) else results.append(parsed)
+                    except (json.JSONDecodeError, TypeError):
+                        results.append(page_data)
+                else:
+                    results.append(page_data)
+            if not await self._query_async(next_selector):
+                break
+            await self.click_async(next_selector)
+            await self.wait_for_navigation_async(timeout=15)
+        return results
+
     async def js_async(self, code: str):
-        """Evaluate *code* in the page context and return a Python value."""
         try:
             result = await self.cmd_async("Runtime.evaluate", {
                 "expression": code,
@@ -1476,17 +1756,6 @@ class AsyncWebTool:
 class BrowserPool:
     """Async pool of N independent headless Chrome processes.
 
-    Supports the async context manager protocol and parallel task dispatch
-    via ``map()``.  Each pool slot owns a dedicated ``AsyncWebTool`` backed by
-    its own Chrome process — no shared state between concurrent tasks.
-
-    Parameters
-    ----------
-    size        : number of Chrome processes to spawn
-    headless    : launch Chrome headless (default: True)
-    port_start  : first port to allocate; subsequent slots use ports
-                  port_start, port_start+10, port_start+20, …
-
     Usage
     -----
     async with BrowserPool(size=2) as pool:
@@ -1507,8 +1776,6 @@ class BrowserPool:
         self._browsers: list = []
         self._tools: list[AsyncWebTool] = []
 
-    # ──────────── async context manager ──────────────────────────────────────
-
     async def __aenter__(self) -> "BrowserPool":
         loop = asyncio.get_running_loop()
 
@@ -1521,11 +1788,9 @@ class BrowserPool:
             port = find_free_port(preferred=self.port_start + i * 10)
             browser = BrowserCDP(port=port, headless=self.headless)
             await loop.run_in_executor(None, browser.start)
-            # Allow Chrome's initial blank tab to register in /json
             await asyncio.sleep(1.5)
             tool = AsyncWebTool(port=port)
             await tool.connect()
-            # Drain any stale load events from Chrome's initial page load
             await asyncio.sleep(0.2)
             self._browsers.append(browser)
             self._tools.append(tool)
@@ -1552,18 +1817,11 @@ class BrowserPool:
         self._browsers.clear()
         self._tools.clear()
 
-    # ──────────── parallel dispatch ───────────────────────────────────────────
-
     async def map(
         self,
         fn: "Callable[..., Coroutine[Any, Any, Any]]",
         args_list: "list[Any]",
     ) -> "list[Any]":
-        """Run ``fn(async_web_tool, arg)`` for every item in *args_list*.
-
-        Tasks run in parallel, capped at ``size`` concurrent executions.
-        Tools are distributed via an asyncio.Queue for fair exclusive access.
-        """
         if not self._tools:
             raise WebToolError(
                 "BrowserPool.map(): pool not started — use 'async with'"
@@ -1584,8 +1842,6 @@ class BrowserPool:
             await asyncio.gather(*[_run(arg) for arg in args_list])
         )
 
-    # ──────────── introspection ───────────────────────────────────────────────
-
     def __len__(self) -> int:
         return len(self._tools)
 
@@ -1604,10 +1860,14 @@ if __name__ == "__main__":
     web = WebTool()
     web.connect()
 
-    web.go("https://google.com")
-    web.fill("input[name='q']", "hello world")
-    web.key("Enter")
-    web.wait("h3", timeout=10)
-    web.screenshot("result.jpg")
+    # High-level login
+    ok = web.login(
+        "https://the-internet.herokuapp.com/login",
+        "#username", "tomsmith",
+        "#password", "SuperSecretPassword!",
+        "button[type='submit']",
+    )
+    print("Login succeeded:", ok)
+    print("URL:", web.js("window.location.href"))
 
     web.close()

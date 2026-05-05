@@ -2,7 +2,7 @@
 """
 Minimal Chrome CDP launcher with multi-browser management and pretty logging.
 
-Unchanged from Generation 4 — no modifications required for Generation 5.
+Unchanged from Generation 4 — no modifications required for Generation 6.
 """
 
 import logging
