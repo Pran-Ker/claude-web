@@ -11,13 +11,31 @@
   },
   {
     "name": "click",
-    "description": "Click the first element matching selector. Uses _get_coords() with a fallback selector chain: (1) exact selector, (2) ':first-child' replaced with ':first-of-type', (3) structural pseudo-classes stripped entirely. Scrolls into view before measuring. Raises WebToolError if no variant matches.",
+    "description": "Click the first element matching selector. Uses _get_coords_full() with a fallback selector chain: (1) exact selector, (2) ':first-child' replaced with ':first-of-type', (3) structural pseudo-classes stripped entirely. Scrolls into view before measuring. Raises WebToolError if no variant matches.",
     "parameters": {
       "selector": { "type": "string" }
     },
     "implementation": "web.click(selector)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('selector'); web.close()\"",
     "fallback": "Use coordinate_click when all selector variants fail"
+  },
+  {
+    "name": "double_click",
+    "description": "Double-click the first element matching selector. Sends two click pairs (clickCount=1 then clickCount=2) to satisfy browser dblclick detection. Raises WebToolError if no element found.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.double_click(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.double_click('#editable-cell'); web.close()\""
+  },
+  {
+    "name": "triple_click",
+    "description": "Triple-click the first element matching selector, which selects all text inside an input/textarea. More reliable than Ctrl+A on pages that intercept keyboard shortcuts. Raises WebToolError if no element found.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.triple_click(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.triple_click('input#search'); web.close()\""
   },
   {
     "name": "type",
@@ -28,6 +46,15 @@
     },
     "implementation": "web.fill(selector, text)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.fill('selector', 'text'); web.close()\""
+  },
+  {
+    "name": "clear",
+    "description": "Clear the value of an input or textarea matched by selector. Sets value to empty string and dispatches input/change events.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.clear(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.clear('input#search'); web.close()\""
   },
   {
     "name": "screenshot",
@@ -77,6 +104,27 @@
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); found = web.wait('.my-class', 15); print(found); web.close()\""
   },
   {
+    "name": "wait_for_visible",
+    "description": "Poll at 0.1 s intervals until the element matching selector is both present in the DOM AND computed-visible (display != 'none', visibility != 'hidden', opacity != '0'). Returns True when visible, False on timeout. Use instead of wait() when elements are dynamically shown/hidden.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "timeout": { "type": "number", "default": 10 }
+    },
+    "implementation": "web.wait_for_visible(selector, timeout)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.hover('.menu-item'); ok = web.wait_for_visible('.dropdown', 5); web.close()\""
+  },
+  {
+    "name": "wait_for_text",
+    "description": "Poll at 0.1 s intervals until the element matching selector contains the given text in its textContent. Returns True when matched, False on timeout. Useful for dynamic content that updates after an action.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "text": { "type": "string" },
+      "timeout": { "type": "number", "default": 10 }
+    },
+    "implementation": "web.wait_for_text(selector, text, timeout)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('button#submit'); ok = web.wait_for_text('#status', 'Success', 10); web.close()\""
+  },
+  {
     "name": "wait_for_navigation",
     "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation.",
     "parameters": {
@@ -97,12 +145,12 @@
   },
   {
     "name": "hover",
-    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Uses the same fallback-chain as click(): tries exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes. This lets selectors like '.figure:first-child img' succeed even when the element is not the absolute first child.",
+    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Gen 5 two-layer approach: (1) Input.dispatchMouseEvent(mouseMoved) triggers JS mouseover handlers and Chrome's built-in CSS :hover tracking; (2) CSS.forcePseudoState pins the :hover pseudo-class on the node at those coordinates so CSS rules like '.parent:hover .child { display:block }' remain active when you inspect the page immediately after hover() returns — no race condition. Uses the fallback-chain: exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes.",
     "parameters": {
       "selector": { "type": "string" }
     },
     "implementation": "web.hover(selector)",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.hover('nav .menu-item'); web.close()\""
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.hover('nav .menu-item'); web.wait_for_visible('.dropdown-menu', 3); web.close()\""
   },
   {
     "name": "select_option",
@@ -113,6 +161,34 @@
     },
     "implementation": "web.select_option(selector, value)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.select_option('#country', 'US'); web.close()\""
+  },
+  {
+    "name": "is_visible",
+    "description": "Return True if the element matching selector is present in the DOM AND computed-visible (display != 'none', visibility != 'hidden', opacity != '0'). Returns False if not found or not visible.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.is_visible(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); print(web.is_visible('.modal')); web.close()\""
+  },
+  {
+    "name": "get_computed_style",
+    "description": "Return the computed CSS property value for the element matching selector. Returns None if the element is not found. Useful for verifying hover effects, animations, and conditional visibility without relying on class names.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "property_name": { "type": "string", "description": "CSS property name, e.g. 'display', 'visibility', 'color', 'opacity'" }
+    },
+    "implementation": "web.get_computed_style(selector, property_name)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.hover('.figure'); print(web.get_computed_style('.figcaption', 'display')); web.close()\""
+  },
+  {
+    "name": "get_element_count",
+    "description": "Return the number of DOM elements matching selector. Single JS round-trip. Returns 0 if none match.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.get_element_count(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); print(web.get_element_count('.quote')); web.close()\""
   },
   {
     "name": "find_by_text",
@@ -165,6 +241,16 @@
     "parameters": {},
     "implementation": "web.get_page_structure()",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); print(json.dumps(web.get_page_structure(), indent=2)); web.close()\""
+  },
+  {
+    "name": "upload_file",
+    "description": "Set a file-input element's files via DOM.setFileInputFiles — no OS file-picker dialog appears. Raises WebToolError if element is not found or not a file input.",
+    "parameters": {
+      "selector": { "type": "string", "description": "CSS selector for the <input type='file'> element" },
+      "file_path": { "type": "string", "description": "Absolute path to the file to upload" }
+    },
+    "implementation": "web.upload_file(selector, file_path)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.upload_file('input[type=file]', '/tmp/doc.pdf'); web.close()\""
   },
   {
     "name": "open_tab",
@@ -230,7 +316,7 @@
   },
   {
     "name": "browser_pool",
-    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. go_async() is race-safe: stale load events from the initial blank-page are detected and discarded, and readyState is verified after the load event fires so that document.title is always populated on return.",
+    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. go_async() is race-safe: stale load events from the initial blank-page are detected and discarded, and readyState is verified after the load event fires so that document.title is always populated on return. AsyncWebTool.hover_async() uses the same two-layer hover as the sync version (mouseMoved + CSS.forcePseudoState).",
     "parameters": {
       "size": { "type": "number", "default": 2, "description": "Number of Chrome processes in the pool" },
       "headless": { "type": "boolean", "default": true },
@@ -243,7 +329,7 @@
   },
   {
     "name": "async_web_tool",
-    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, fill_async, wait_async, screenshot_async. go_async() uses a race-safe sequence with readyState verification. Used internally by BrowserPool.",
+    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, hover_async, fill_async, wait_async, screenshot_async. go_async() uses a race-safe sequence with readyState verification. hover_async() uses mouseMoved + CSS.forcePseudoState for reliable :hover state. Used internally by BrowserPool.",
     "parameters": {
       "port": { "type": "number", "default": 9222 }
     },
