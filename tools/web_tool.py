@@ -1,25 +1,33 @@
 """
-web_tool.py — Generation 2 WebTool built on Chrome DevTools Protocol (CDP).
+web_tool.py — Generation 3 WebTool built on Chrome DevTools Protocol (CDP).
 
-Changes over Generation 1
+Changes over Generation 2
 --------------------------
-- _query()            : switched from DOM.querySelector to Runtime.evaluate +
-                        document.querySelector + DOM.requestNode — full CSS3
-                        pseudo-selector support (:first-child, :nth-child, etc.)
-- go()                : also accepts Page.frameStoppedLoading as a load signal
-                        (in addition to Page.loadEventFired); document.readyState
-                        check as last-resort fallback before warning
-- _wait_for_any_event : generalised helper that accepts a *set* of event names
-- wait_for_navigation : block until next page load event fires after click/submit
-- get_all_links       : extract all hrefs from the current page in one JS call
-- get_table           : extract a <table> as a list of dicts keyed by header text
-- get_form_fields     : introspect form structure (inputs, selects, textareas)
-- open_tab            : open a new Chrome tab via Target.createTarget
-- switch_tab          : reconnect the WebSocket to a different tab
-- close_tab           : close a tab by id
-- get_open_tabs       : list all open page-type tabs
-- AsyncWebTool        : fully async implementation using the `websockets` library
-                        with go_async, cmd_async, js_async, click_async, fill_async
+- _query()          : replaced DOM.requestNode round-trip with a pure-JS
+                      existence check (document.querySelector != null ? 1 : 0);
+                      no CDP DOM domain calls needed — eliminates the stale
+                      execution-context race condition that caused T1c / T2a /
+                      T2d / T4a failures
+- _get_coords()     : new unified helper — uses a single Runtime.evaluate that
+                      calls scrollIntoView() then getBoundingClientRect() to
+                      return viewport-relative (x, y) without DOM.requestNode
+                      or DOM.getBoxModel; retries up to 3× with 0.1 s gaps for
+                      post-navigation timing windows
+- _center_of()      : kept as thin wrapper around _get_coords() for compat
+- click() / hover() : switched to _get_coords(); JS uses double-quote delimiters
+                      so attribute selectors containing ' (e.g. a[href='/login'])
+                      work correctly — fixes T2a
+- fill()            : first tries click+select-all+type; falls back to direct
+                      JS value assignment + input/change events if coords not
+                      found — fixes T1c / T4a as belt-and-suspenders
+- BrowserPool       : completely rewritten as an async class supporting:
+                        * async with BrowserPool(size=N) as pool
+                        * await pool.map(async_fn, [arg1, arg2, …])
+                      Each slot owns a dedicated AsyncWebTool (and Chrome
+                      process); an asyncio.Queue gates fair distribution of
+                      tasks — fixes T4b
+- AsyncWebTool      : _query_async / click_async updated to use the same
+                      double-quote JS technique; added _get_coords_async
 """
 
 from __future__ import annotations
@@ -29,14 +37,14 @@ import base64
 import json
 import threading
 import time
-from typing import Optional
+from typing import Any, Callable, Coroutine, Optional
 
 import requests
 import websocket
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sentinel load-event names that signal "page is done loading"
+# Load-event sentinel names
 # ──────────────────────────────────────────────────────────────────────────────
 
 _LOAD_SIGNALS: frozenset[str] = frozenset({
@@ -51,6 +59,24 @@ _LOAD_SIGNALS: frozenset[str] = frozenset({
 
 class WebToolError(Exception):
     """Raised when a WebTool operation cannot complete."""
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Selector escaping helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _esc_dq(selector: str) -> str:
+    """Escape *selector* for embedding in a JS double-quoted string.
+
+    Handles backslashes first, then double-quotes — preserves single quotes
+    so CSS attribute selectors like a[href='/x'] are passed through unchanged.
+    """
+    return selector.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _esc_sq(selector: str) -> str:
+    """Escape *selector* for embedding in a JS single-quoted string."""
+    return selector.replace("\\", "\\\\").replace("'", "\\'")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -74,19 +100,15 @@ class WebTool:
         self.ws: Optional[websocket.WebSocket] = None
         self.msg_id = 0
 
-        # Thread-safe buffer for CDP events received while waiting for a
-        # command response.
         self._event_lock = threading.Lock()
         self._pending_events: list[dict] = []
 
-        # Multi-tab support
-        self._tabs: dict[str, str] = {}          # tab_id  → ws_debugger_url
+        self._tabs: dict[str, str] = {}
         self._current_tab_id: Optional[str] = None
 
     # ──────────────────────────── connection ─────────────────────────────────
 
     def connect(self, tab_index: int = 0):
-        """Connect to the tab at *tab_index* (default: first tab)."""
         tabs = requests.get(f"http://localhost:{self.port}/json").json()
         if not tabs:
             raise WebToolError(f"No tabs found on port {self.port}")
@@ -100,7 +122,6 @@ class WebTool:
         self.cmd("Target.setDiscoverTargets", {"discover": True})
 
     def close(self):
-        """Close the WebSocket connection."""
         if self.ws:
             self.ws.close()
             self.ws = None
@@ -108,7 +129,6 @@ class WebTool:
     # ──────────────────────────── low-level cmd ──────────────────────────────
 
     def cmd(self, method: str, params: Optional[dict] = None) -> dict:
-        """Send a CDP command and return the matching response."""
         self.msg_id += 1
         msg = {"id": self.msg_id, "method": method, "params": params or {}}
         self.ws.send(json.dumps(msg))
@@ -117,12 +137,10 @@ class WebTool:
         while True:
             raw = self.ws.recv()
             response = json.loads(raw)
-
             if "method" in response:
                 with self._event_lock:
                     self._pending_events.append(response)
                 continue
-
             if response.get("id") == target_id:
                 return response
 
@@ -136,10 +154,6 @@ class WebTool:
         event_methods: "frozenset[str] | set[str]",
         timeout: float = 30.0,
     ) -> Optional[str]:
-        """Block until *any* of the CDP events in *event_methods* arrives.
-
-        Returns the matched method name, or None on timeout.
-        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -168,14 +182,7 @@ class WebTool:
     # ──────────────────────────── navigation ─────────────────────────────────
 
     def go(self, url: str, timeout: float = 30.0):
-        """Navigate to *url* and wait for a page-load signal.
-
-        Accepts either ``Page.loadEventFired`` *or* ``Page.frameStoppedLoading``
-        as the termination condition so that pages that skip loadEventFired
-        (e.g. via HTTP redirects or custom resource handling) are handled
-        correctly.  Falls back to a ``document.readyState`` check if neither
-        event arrives within *timeout*.
-        """
+        """Navigate to *url* and wait for a page-load signal."""
         self._drain_events()
 
         self.msg_id += 1
@@ -219,7 +226,6 @@ class WebTool:
         self.ws.settimeout(None)
 
         if not load_fired:
-            # Last-resort: if readyState is already complete/interactive, accept it.
             try:
                 state = self.js("document.readyState")
                 if state in ("complete", "interactive"):
@@ -227,15 +233,14 @@ class WebTool:
             except Exception:
                 pass
             print(
-                f"[WebTool] Warning: page-load event not received within {timeout}s "
-                f"for {url!r}"
+                f"[WebTool] Warning: page-load event not received within "
+                f"{timeout}s for {url!r}"
             )
 
     def wait_for_navigation(self, timeout: float = 15.0) -> bool:
         """Block until the next page-load event fires (e.g. after a click).
 
         Returns True if a load event arrived, False on timeout.
-        Useful after ``click()`` on a link or form submit button.
         """
         result = self._wait_for_any_event(_LOAD_SIGNALS, timeout)
         return result is not None
@@ -243,34 +248,56 @@ class WebTool:
     # ──────────────────────────── element helpers ─────────────────────────────
 
     def _query(self, selector: str) -> int:
-        """Return nodeId for *selector*, or 0 if not found.
+        """Return 1 if *selector* matches any element, 0 otherwise.
 
-        Uses ``Runtime.evaluate`` + ``document.querySelector`` for full CSS3
-        support (including ``:first-child``, ``:nth-child``, attribute selectors,
-        etc.) then converts the remote object to a nodeId via ``DOM.requestNode``.
+        Uses a pure-JS Runtime.evaluate so no DOM domain calls are needed —
+        avoids the stale-objectId / DOM.requestNode race condition that caused
+        spurious 'element not found' errors in gen-2.
         """
-        escaped = selector.replace("\\", "\\\\").replace("'", "\\'")
-        result = self.cmd("Runtime.evaluate", {
-            "expression": f"document.querySelector('{escaped}')",
-            "returnByValue": False,
-        })
+        escaped = _esc_dq(selector)
+        result = self.js(
+            f'document.querySelector("{escaped}") !== null ? 1 : 0'
+        )
+        return 1 if result == 1 else 0
 
-        rr = result.get("result", {})
-        # JS exception inside evaluate
-        if "exceptionDetails" in rr:
-            return 0
+    def _get_coords(self, selector: str) -> Optional[tuple[float, float]]:
+        """Return viewport-relative (x, y) centre of the element.
 
-        obj = rr.get("result", {})
-        obj_id = obj.get("objectId")
-        # querySelector returned null
-        if not obj_id or obj.get("subtype") == "null":
-            return 0
+        A single Runtime.evaluate call:
+          1. Runs document.querySelector with double-quoted selector string so
+             attribute selectors containing single quotes (a[href='/x']) work.
+          2. Calls scrollIntoView() to bring the element on-screen.
+          3. Returns getBoundingClientRect() centre — viewport coordinates
+             correct for Input.dispatchMouseEvent.
 
-        node_result = self.cmd("DOM.requestNode", {"objectId": obj_id})
-        return node_result.get("result", {}).get("nodeId", 0)
+        Retries up to 3 times with 0.1 s gaps to handle post-navigation DOM
+        rendering delays.
+        """
+        escaped = _esc_dq(selector)
+        code = (
+            f'(function(){{'
+            f'  var el = document.querySelector("{escaped}");'
+            f'  if (!el) return null;'
+            f'  el.scrollIntoView({{block:"nearest",inline:"nearest"}});'
+            f'  var r = el.getBoundingClientRect();'
+            f'  return JSON.stringify({{x: r.left + r.width/2,'
+            f'                         y: r.top  + r.height/2}});'
+            f'}})()'
+        )
+        for attempt in range(3):
+            raw = self.js(code)
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    return data["x"], data["y"]
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            if attempt < 2:
+                time.sleep(0.1)
+        return None
 
     def _center_of(self, node_id: int) -> tuple[float, float]:
-        """Return (x, y) centre of the element bounding box."""
+        """Legacy shim — prefer _get_coords(selector) for new code."""
         box = self.cmd("DOM.getBoxModel", {"nodeId": node_id})
         if "error" in box:
             raise WebToolError(
@@ -286,13 +313,14 @@ class WebTool:
     def click(self, selector: str) -> bool:
         """Click the first element matching *selector*.
 
-        Raises WebToolError if the element is not found or has no box model.
+        Uses _get_coords() (pure-JS, double-quote delimiter) so CSS attribute
+        selectors with single quotes (a[href='/login']) work correctly.
+        Raises WebToolError if the element is not found.
         """
-        node_id = self._query(selector)
-        if not node_id:
+        coords = self._get_coords(selector)
+        if coords is None:
             raise WebToolError(f"click(): no element for selector {selector!r}")
-
-        x, y = self._center_of(node_id)
+        x, y = coords
         self.cmd("Input.dispatchMouseEvent", {
             "type": "mousePressed", "x": x, "y": y,
             "button": "left", "clickCount": 1,
@@ -309,23 +337,56 @@ class WebTool:
             self.cmd("Input.dispatchKeyEvent", {"type": "char", "text": char})
 
     def fill(self, selector: str, text: str):
-        """Click *selector*, select-all existing content, then type *text*."""
-        self.click(selector)
-        self.cmd("Input.dispatchKeyEvent", {
-            "type": "keyDown", "key": "a", "modifiers": 2,
-        })
-        self.type(text)
+        """Focus *selector*, clear existing content, and type *text*.
+
+        Primary path: click to focus → Ctrl+A → type.
+        Fallback:     if the element cannot be located via getBoundingClientRect
+                      (e.g. very early in DOM construction) we fall back to
+                      direct JS value assignment + input/change events so the
+                      field value is set even without simulated key-presses.
+        """
+        coords = self._get_coords(selector)
+        if coords is not None:
+            x, y = coords
+            self.cmd("Input.dispatchMouseEvent", {
+                "type": "mousePressed", "x": x, "y": y,
+                "button": "left", "clickCount": 1,
+            })
+            self.cmd("Input.dispatchMouseEvent", {
+                "type": "mouseReleased", "x": x, "y": y,
+                "button": "left", "clickCount": 1,
+            })
+            self.cmd("Input.dispatchKeyEvent", {
+                "type": "keyDown", "key": "a", "modifiers": 2,
+            })
+            self.type(text)
+        else:
+            # JS fallback — set value directly and fire React/Vue-compatible events
+            esc_sel  = _esc_dq(selector)
+            esc_text = _esc_dq(text)
+            result = self.js(
+                f'(function(){{'
+                f'  var el = document.querySelector("{esc_sel}");'
+                f'  if (!el) return "NOT_FOUND";'
+                f'  el.focus();'
+                f'  el.value = "{esc_text}";'
+                f'  el.dispatchEvent(new Event("input",  {{bubbles:true}}));'
+                f'  el.dispatchEvent(new Event("change", {{bubbles:true}}));'
+                f'  return "ok";'
+                f'}})()'
+            )
+            if result == "NOT_FOUND":
+                raise WebToolError(
+                    f"fill(): no element for selector {selector!r}"
+                )
 
     def key(self, key: str):
         """Press a named key (Enter, Tab, Escape, ArrowDown …)."""
         self.cmd("Input.dispatchKeyEvent", {"type": "keyDown", "key": key})
-        self.cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": key})
+        self.cmd("Input.dispatchKeyEvent", {"type": "keyUp",   "key": key})
 
     def wait(self, selector: str, timeout: float = 10.0) -> bool:
-        """Poll for *selector* at 0.1 s intervals; return True when found.
-
-        Returns False if *timeout* elapses without finding the element.
-        """
+        """Poll for *selector* at 0.1 s intervals; return True when found."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._query(selector):
@@ -366,32 +427,27 @@ class WebTool:
     def hover(self, selector: str):
         """Move the mouse over *selector* to trigger :hover / reveal dropdowns.
 
+        Uses _get_coords() so all CSS3 pseudo-selectors work, including
+        :first-child, :nth-child, attribute selectors with single quotes, etc.
         Raises WebToolError if the element is not found.
         """
-        node_id = self._query(selector)
-        if not node_id:
+        coords = self._get_coords(selector)
+        if coords is None:
             raise WebToolError(f"hover(): no element for selector {selector!r}")
-
-        x, y = self._center_of(node_id)
+        x, y = coords
         self.cmd("Input.dispatchMouseEvent", {
             "type": "mouseMoved", "x": x, "y": y,
         })
 
     def select_option(self, selector: str, value: str):
-        """Set a <select> element to *value* and fire a change event.
-
-        Parameters
-        ----------
-        selector : CSS selector targeting the <select> element
-        value    : the *value* attribute of the <option> to select
-        """
-        escaped_sel = selector.replace("'", "\\'")
-        escaped_val = value.replace("'", "\\'")
+        """Set a <select> element to *value* and fire a change event."""
+        esc_sel = _esc_sq(selector)
+        esc_val = _esc_sq(value)
         code = (
             f"(function(){{"
-            f"  var el = document.querySelector('{escaped_sel}');"
+            f"  var el = document.querySelector('{esc_sel}');"
             f"  if (!el) return 'NOT_FOUND';"
-            f"  el.value = '{escaped_val}';"
+            f"  el.value = '{esc_val}';"
             f"  el.dispatchEvent(new Event('change', {{bubbles: true}}));"
             f"  return el.value;"
             f"}})()"
@@ -405,17 +461,13 @@ class WebTool:
     # ─── text / data extraction ───────────────────────────────────────────────
 
     def find_by_text(self, text: str, tag: str = "*") -> Optional[dict]:
-        """Return info about the first element with *text* as visible text content.
-
-        Returns a dict with ``{tagName, selector}`` or None if not found.
-        Uses a single batched JS call for efficiency.
-        """
-        escaped_text = text.replace("\\", "\\\\").replace("'", "\\'")
-        escaped_tag  = tag.replace("'", "\\'")
+        """Return ``{tagName, selector}`` for the first element with exact *text*."""
+        esc_text = _esc_sq(text)
+        esc_tag  = _esc_sq(tag)
         code = (
             f"(function(){{"
-            f"  var tag = '{escaped_tag}';"
-            f"  var needle = '{escaped_text}';"
+            f"  var tag = '{esc_tag}';"
+            f"  var needle = '{esc_text}';"
             f"  var els = document.querySelectorAll(tag);"
             f"  for (var i = 0; i < els.length; i++) {{"
             f"    if (els[i].textContent.trim() === needle) {{"
@@ -427,7 +479,8 @@ class WebTool:
             f"          if (sib.tagName === e.tagName) idx++;"
             f"          sib = sib.previousElementSibling;"
             f"        }}"
-            f"        parts.unshift(e.tagName.toLowerCase() + ':nth-of-type(' + idx + ')');"
+            f"        parts.unshift(e.tagName.toLowerCase()+"
+            f"                      ':nth-of-type('+idx+')');"
             f"        e = e.parentElement;"
             f"      }}"
             f"      return JSON.stringify({{tagName: els[i].tagName,"
@@ -443,10 +496,7 @@ class WebTool:
         return json.loads(raw)
 
     def click_by_text(self, text: str, tag: str = "*") -> bool:
-        """Find the first element with visible text *text* and click it.
-
-        Raises WebToolError if no matching element is found.
-        """
+        """Find the first element with visible text *text* and click it."""
         info = self.find_by_text(text, tag)
         if not info:
             raise WebToolError(
@@ -455,10 +505,7 @@ class WebTool:
         return self.click(info["selector"])
 
     def get_all_links(self) -> list[str]:
-        """Return every non-javascript href found on the page.
-
-        Performs a single batched ``Runtime.evaluate`` call.
-        """
+        """Return every non-javascript: href on the page (single JS call)."""
         result = self.js(
             "JSON.stringify("
             "  Array.from(document.querySelectorAll('a[href]'))"
@@ -471,33 +518,30 @@ class WebTool:
         return json.loads(result)
 
     def get_table(self, selector: str = "table") -> list[dict]:
-        """Extract the first ``<table>`` matching *selector* as a list of dicts.
-
-        Header cells (``<th>`` in ``<thead>``, or the first ``<tr>``) become
-        dict keys; each body row becomes one dict.
-
-        Raises WebToolError if no matching table is found.
-        """
-        escaped = selector.replace("'", "\\'")
+        """Extract a <table> as a list of dicts keyed by header text."""
+        escaped = _esc_sq(selector)
         code = (
             f"(function(){{"
             f"  var t = document.querySelector('{escaped}');"
             f"  if (!t) return null;"
-            f"  var headers = Array.from(t.querySelectorAll('thead th, thead td'))"
-            f"                     .map(function(h){{ return h.textContent.trim(); }});"
+            f"  var headers = Array.from("
+            f"    t.querySelectorAll('thead th, thead td'))"
+            f"    .map(function(h){{ return h.textContent.trim(); }});"
             f"  if (headers.length === 0) {{"
             f"    var fr = t.querySelector('tr');"
             f"    if (fr) headers = Array.from(fr.querySelectorAll('th,td'))"
-            f"                           .map(function(h){{ return h.textContent.trim(); }});"
+            f"      .map(function(h){{ return h.textContent.trim(); }});"
             f"  }}"
             f"  var bodyRows = Array.from(t.querySelectorAll('tbody tr'));"
             f"  if (bodyRows.length === 0)"
             f"    bodyRows = Array.from(t.querySelectorAll('tr')).slice(1);"
             f"  return JSON.stringify(bodyRows.map(function(row){{"
             f"    var cells = Array.from(row.querySelectorAll('td,th'))"
-            f"                     .map(function(c){{ return c.textContent.trim(); }});"
+            f"      .map(function(c){{ return c.textContent.trim(); }});"
             f"    var obj = {{}};"
-            f"    cells.forEach(function(c,i){{ obj[headers[i] !== undefined ? headers[i] : i] = c; }});"
+            f"    cells.forEach(function(c,i){{"
+            f"      obj[headers[i] !== undefined ? headers[i] : i] = c;"
+            f"    }});"
             f"    return obj;"
             f"  }}));"
             f"}})()"
@@ -510,33 +554,25 @@ class WebTool:
         return json.loads(result)
 
     def get_form_fields(self, selector: str = "form") -> list[dict]:
-        """Introspect form structure.
-
-        Returns a list of dicts, one per ``<input>``, ``<select>``, or
-        ``<textarea>`` inside the first element matching *selector*.
-
-        Each dict has keys: ``tag``, ``type``, ``name``, ``id``, ``value``,
-        ``placeholder``, ``required``.
-
-        Raises WebToolError if no matching element is found.
-        """
-        escaped = selector.replace("'", "\\'")
+        """Introspect form structure; returns list of field dicts."""
+        escaped = _esc_sq(selector)
         code = (
             f"(function(){{"
             f"  var form = document.querySelector('{escaped}');"
             f"  if (!form) return null;"
             f"  var fields = [];"
-            f"  form.querySelectorAll('input,select,textarea').forEach(function(el){{"
-            f"    fields.push({{"
-            f"      tag: el.tagName.toLowerCase(),"
-            f"      type: el.type || '',"
-            f"      name: el.name || '',"
-            f"      id: el.id || '',"
-            f"      value: el.value || '',"
-            f"      placeholder: el.placeholder || '',"
-            f"      required: el.required || false"
+            f"  form.querySelectorAll('input,select,textarea').forEach("
+            f"    function(el){{"
+            f"      fields.push({{"
+            f"        tag: el.tagName.toLowerCase(),"
+            f"        type: el.type || '',"
+            f"        name: el.name || '',"
+            f"        id:   el.id   || '',"
+            f"        value: el.value || '',"
+            f"        placeholder: el.placeholder || '',"
+            f"        required: el.required || false"
+            f"      }});"
             f"    }});"
-            f"  }});"
             f"  return JSON.stringify(fields);"
             f"}})()"
         )
@@ -550,7 +586,6 @@ class WebTool:
     # ─── multi-tab support ────────────────────────────────────────────────────
 
     def _refresh_tab_registry(self):
-        """Sync self._tabs with the Chrome tab list."""
         try:
             tabs = requests.get(
                 f"http://localhost:{self.port}/json/list", timeout=5
@@ -564,27 +599,14 @@ class WebTool:
                 self._tabs[t["id"]] = t["webSocketDebuggerUrl"]
 
     def open_tab(self, url: str = "about:blank") -> str:
-        """Open a new browser tab and return its tab id.
-
-        The new tab is created but the *current* connection is **not** changed.
-        Call ``switch_tab(tab_id)`` to interact with it.
-
-        Parameters
-        ----------
-        url : initial URL to navigate the new tab to
-        """
+        """Open a new browser tab and return its tab id."""
         result = self.cmd("Target.createTarget", {"url": url})
         tab_id: str = result["result"]["targetId"]
-        # Register the debugger URL for future switch_tab calls
         self._refresh_tab_registry()
         return tab_id
 
     def switch_tab(self, tab_id: str):
-        """Reconnect the WebSocket to the tab identified by *tab_id*.
-
-        After this call, all subsequent commands operate on that tab.
-        Raises WebToolError if the tab is not found.
-        """
+        """Reconnect to the tab identified by *tab_id*."""
         if tab_id == self._current_tab_id:
             return
 
@@ -604,17 +626,12 @@ class WebTool:
         self.ws = websocket.create_connection(ws_url)
         self._current_tab_id = tab_id
         self.msg_id = 0
-        # Re-enable CDP domains for the new session
         self.cmd("Page.enable")
         self.cmd("DOM.enable")
         self.cmd("Runtime.enable")
 
     def close_tab(self, tab_id: str):
-        """Close the tab identified by *tab_id*.
-
-        If this is the currently active tab, the WebSocket connection is also
-        closed.  You must call ``switch_tab()`` to another tab afterwards.
-        """
+        """Close the tab identified by *tab_id*."""
         self.cmd("Target.closeTarget", {"targetId": tab_id})
         self._tabs.pop(tab_id, None)
         if tab_id == self._current_tab_id:
@@ -626,10 +643,7 @@ class WebTool:
             self._current_tab_id = None
 
     def get_open_tabs(self) -> list[dict]:
-        """Return a list of dicts for every open page-type tab.
-
-        Each dict has keys: ``id``, ``url``, ``title``.
-        """
+        """Return a list of dicts (id, url, title) for every open page tab."""
         self._refresh_tab_registry()
         try:
             tabs = requests.get(
@@ -640,11 +654,7 @@ class WebTool:
                 f"http://localhost:{self.port}/json", timeout=5
             ).json()
         return [
-            {
-                "id": t["id"],
-                "url": t.get("url", ""),
-                "title": t.get("title", ""),
-            }
+            {"id": t["id"], "url": t.get("url", ""), "title": t.get("title", "")}
             for t in tabs
             if t.get("type") == "page"
         ]
@@ -652,11 +662,7 @@ class WebTool:
     # ──────────────────────────── JS helper ──────────────────────────────────
 
     def js(self, code: str):
-        """Evaluate *code* in the page context and return a Python value.
-
-        Primitive types (string, number, boolean, null) are returned directly.
-        Objects/arrays must be wrapped in JSON.stringify() by the caller.
-        """
+        """Evaluate *code* in the page context and return a Python value."""
         try:
             result = self.cmd("Runtime.evaluate", {
                 "expression": code,
@@ -672,7 +678,8 @@ class WebTool:
             if "exceptionDetails" in response:
                 exc = response["exceptionDetails"]
                 print(
-                    f"[WebTool] JS Exception at line {exc.get('lineNumber', '?')}: "
+                    f"[WebTool] JS Exception at line "
+                    f"{exc.get('lineNumber', '?')}: "
                     f"{exc.get('text', 'Unknown error')}"
                 )
                 return None
@@ -692,7 +699,10 @@ class WebTool:
                 return js_result.get("value", js_result.get("description"))
 
         except Exception as exc:
-            print(f"[WebTool] Python Exception in js(): {type(exc).__name__}: {exc}")
+            print(
+                f"[WebTool] Python Exception in js(): "
+                f"{type(exc).__name__}: {exc}"
+            )
             return None
 
     # ──────────────────────────── screenshot ─────────────────────────────────
@@ -703,17 +713,11 @@ class WebTool:
         quality: int = 80,
         format: str = "jpeg",
     ) -> str:
-        """Capture a screenshot.
-
-        Returns the filename if provided, otherwise the raw base-64 string.
-        """
         params: dict = {"format": format}
         if format == "jpeg":
             params["quality"] = quality
-
         result = self.cmd("Page.captureScreenshot", params)
         data = result["result"]["data"]
-
         if filename:
             with open(filename, "wb") as f:
                 f.write(base64.b64decode(data))
@@ -723,19 +727,17 @@ class WebTool:
     # ──────────────────────────── convenience ────────────────────────────────
 
     def text(self, selector: str) -> Optional[str]:
-        """Return the textContent of the first element matching *selector*."""
-        escaped = selector.replace("'", "\\'")
+        escaped = _esc_sq(selector)
         return self.js(
             f"document.querySelector('{escaped}')?.textContent ?? null"
         )
 
     def attr(self, selector: str, attribute: str) -> Optional[str]:
-        """Return an attribute value from the first element matching *selector*."""
-        escaped_sel  = selector.replace("'", "\\'")
-        escaped_attr = attribute.replace("'", "\\'")
+        esc_sel  = _esc_sq(selector)
+        esc_attr = _esc_sq(attribute)
         return self.js(
-            f"document.querySelector('{escaped_sel}')"
-            f"?.getAttribute('{escaped_attr}') ?? null"
+            f"document.querySelector('{esc_sel}')"
+            f"?.getAttribute('{esc_attr}') ?? null"
         )
 
 
@@ -756,38 +758,30 @@ class AsyncWebTool:
         await web.close()
 
     asyncio.run(main())
-
-    Requires
-    --------
-    ``pip install websockets``
     """
 
     def __init__(self, port: int = 9222):
         self.port = port
-        self._ws = None                            # websockets connection
+        self._ws = None
         self._msg_id = 0
         self._pending: dict[int, asyncio.Future] = {}
-        self._event_listeners: list = []           # list of sync/async callables
+        self._event_listeners: list = []
         self._recv_task: Optional[asyncio.Task] = None
 
     # ──────────── connection ──────────────────────────────────────────────────
 
     async def connect(self, tab_index: int = 0):
-        """Connect to the tab at *tab_index*."""
         try:
             import websockets as _ws_lib  # noqa: F401
         except ImportError as exc:
             raise WebToolError(
-                "AsyncWebTool requires the 'websockets' package: "
-                "pip install websockets"
+                "AsyncWebTool requires 'websockets': pip install websockets"
             ) from exc
 
         loop = asyncio.get_running_loop()
         tabs = await loop.run_in_executor(
             None,
-            lambda: requests.get(
-                f"http://localhost:{self.port}/json"
-            ).json(),
+            lambda: requests.get(f"http://localhost:{self.port}/json").json(),
         )
         if not tabs:
             raise WebToolError(f"No tabs found on port {self.port}")
@@ -802,7 +796,6 @@ class AsyncWebTool:
         await self.cmd_async("Runtime.enable")
 
     async def close(self):
-        """Cancel the receive loop and close the WebSocket."""
         if self._recv_task:
             self._recv_task.cancel()
             try:
@@ -817,7 +810,6 @@ class AsyncWebTool:
     # ──────────── receive loop ────────────────────────────────────────────────
 
     async def _recv_loop(self):
-        """Background task: demux CDP messages to waiting futures or listeners."""
         try:
             async for raw in self._ws:
                 msg = json.loads(raw)
@@ -835,14 +827,17 @@ class AsyncWebTool:
                         except Exception:
                             pass
         except Exception:
-            pass
+            # Cancel any pending futures on connection drop
+            for fut in self._pending.values():
+                if not fut.done():
+                    fut.cancel()
+            self._pending.clear()
 
     # ──────────── low-level ──────────────────────────────────────────────────
 
     async def cmd_async(
         self, method: str, params: Optional[dict] = None
     ) -> dict:
-        """Send a CDP command and await its response."""
         self._msg_id += 1
         msg_id = self._msg_id
         loop = asyncio.get_running_loop()
@@ -880,7 +875,6 @@ class AsyncWebTool:
                 pass
 
     async def wait_for_navigation_async(self, timeout: float = 15.0) -> bool:
-        """Await the next page-load event. Returns True if it arrived."""
         loop = asyncio.get_running_loop()
         load_fut: asyncio.Future = loop.create_future()
 
@@ -903,41 +897,49 @@ class AsyncWebTool:
     # ──────────── element helpers ─────────────────────────────────────────────
 
     async def _query_async(self, selector: str) -> int:
-        """Return nodeId for *selector* (0 = not found)."""
-        escaped = selector.replace("\\", "\\\\").replace("'", "\\'")
-        result = await self.cmd_async("Runtime.evaluate", {
-            "expression": f"document.querySelector('{escaped}')",
-            "returnByValue": False,
-        })
-        rr = result.get("result", {})
-        if "exceptionDetails" in rr:
-            return 0
-        obj = rr.get("result", {})
-        obj_id = obj.get("objectId")
-        if not obj_id or obj.get("subtype") == "null":
-            return 0
-        node_result = await self.cmd_async("DOM.requestNode", {"objectId": obj_id})
-        return node_result.get("result", {}).get("nodeId", 0)
+        """Return 1 if *selector* matches any element, 0 otherwise."""
+        escaped = _esc_dq(selector)
+        result = await self.js_async(
+            f'document.querySelector("{escaped}") !== null ? 1 : 0'
+        )
+        return 1 if result == 1 else 0
 
-    async def _center_of_async(self, node_id: int) -> tuple[float, float]:
-        box = await self.cmd_async("DOM.getBoxModel", {"nodeId": node_id})
-        if "error" in box:
-            raise WebToolError(
-                f"Cannot get box model for nodeId={node_id}: {box['error']}"
-            )
-        content = box["result"]["model"]["content"]
-        return (content[0] + content[4]) / 2, (content[1] + content[5]) / 2
+    async def _get_coords_async(
+        self, selector: str
+    ) -> Optional[tuple[float, float]]:
+        """Return viewport-relative (x, y) centre of element (async)."""
+        escaped = _esc_dq(selector)
+        code = (
+            f'(function(){{'
+            f'  var el = document.querySelector("{escaped}");'
+            f'  if (!el) return null;'
+            f'  el.scrollIntoView({{block:"nearest",inline:"nearest"}});'
+            f'  var r = el.getBoundingClientRect();'
+            f'  return JSON.stringify({{x: r.left + r.width/2,'
+            f'                         y: r.top  + r.height/2}});'
+            f'}})()'
+        )
+        for attempt in range(3):
+            raw = await self.js_async(code)
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    return data["x"], data["y"]
+                except (json.JSONDecodeError, KeyError):
+                    pass
+            if attempt < 2:
+                await asyncio.sleep(0.1)
+        return None
 
     # ──────────── public async actions ───────────────────────────────────────
 
     async def click_async(self, selector: str) -> bool:
-        """Click the first element matching *selector*."""
-        node_id = await self._query_async(selector)
-        if not node_id:
+        coords = await self._get_coords_async(selector)
+        if coords is None:
             raise WebToolError(
                 f"click_async(): no element for selector {selector!r}"
             )
-        x, y = await self._center_of_async(node_id)
+        x, y = coords
         await self.cmd_async("Input.dispatchMouseEvent", {
             "type": "mousePressed", "x": x, "y": y,
             "button": "left", "clickCount": 1,
@@ -949,15 +951,43 @@ class AsyncWebTool:
         return True
 
     async def fill_async(self, selector: str, text: str):
-        """Click *selector*, select-all, then type *text* asynchronously."""
-        await self.click_async(selector)
-        await self.cmd_async("Input.dispatchKeyEvent", {
-            "type": "keyDown", "key": "a", "modifiers": 2,
-        })
-        for char in text:
-            await self.cmd_async(
-                "Input.dispatchKeyEvent", {"type": "char", "text": char}
+        """Focus *selector*, clear, then type *text* asynchronously."""
+        coords = await self._get_coords_async(selector)
+        if coords is not None:
+            x, y = coords
+            await self.cmd_async("Input.dispatchMouseEvent", {
+                "type": "mousePressed", "x": x, "y": y,
+                "button": "left", "clickCount": 1,
+            })
+            await self.cmd_async("Input.dispatchMouseEvent", {
+                "type": "mouseReleased", "x": x, "y": y,
+                "button": "left", "clickCount": 1,
+            })
+            await self.cmd_async("Input.dispatchKeyEvent", {
+                "type": "keyDown", "key": "a", "modifiers": 2,
+            })
+            for char in text:
+                await self.cmd_async(
+                    "Input.dispatchKeyEvent", {"type": "char", "text": char}
+                )
+        else:
+            esc_sel  = _esc_dq(selector)
+            esc_text = _esc_dq(text)
+            result = await self.js_async(
+                f'(function(){{'
+                f'  var el = document.querySelector("{esc_sel}");'
+                f'  if (!el) return "NOT_FOUND";'
+                f'  el.focus();'
+                f'  el.value = "{esc_text}";'
+                f'  el.dispatchEvent(new Event("input",  {{bubbles:true}}));'
+                f'  el.dispatchEvent(new Event("change", {{bubbles:true}}));'
+                f'  return "ok";'
+                f'}})()'
             )
+            if result == "NOT_FOUND":
+                raise WebToolError(
+                    f"fill_async(): no element for selector {selector!r}"
+                )
 
     async def wait_async(self, selector: str, timeout: float = 10.0) -> bool:
         """Poll for *selector* at 0.1 s intervals; return True when found."""
@@ -1000,7 +1030,6 @@ class AsyncWebTool:
         quality: int = 80,
         fmt: str = "jpeg",
     ) -> str:
-        """Capture a screenshot asynchronously."""
         params: dict = {"format": fmt}
         if fmt == "jpeg":
             params["quality"] = quality
@@ -1011,6 +1040,138 @@ class AsyncWebTool:
                 f.write(base64.b64decode(data))
             return filename
         return data
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Async BrowserPool
+# ──────────────────────────────────────────────────────────────────────────────
+
+class BrowserPool:
+    """Async pool of N independent headless Chrome processes.
+
+    Supports the async context manager protocol and parallel task dispatch
+    via ``map()``.  Each pool slot owns a dedicated ``AsyncWebTool`` backed by
+    its own Chrome process — no shared state between concurrent tasks.
+
+    Parameters
+    ----------
+    size        : number of Chrome processes to spawn
+    headless    : launch Chrome headless (default: True)
+    port_start  : first port to allocate; subsequent slots use the next free
+                  ports above *port_start*
+
+    Usage
+    -----
+    async with BrowserPool(size=2) as pool:
+        results = await pool.map(fetch_title_fn, [url1, url2])
+
+    Where ``fetch_title_fn`` has signature ``async def fn(web, arg) -> Any``.
+    """
+
+    def __init__(
+        self,
+        size: int = 2,
+        headless: bool = True,
+        port_start: int = 9300,
+    ):
+        self.size = size
+        self.headless = headless
+        self.port_start = port_start
+        self._browsers: list = []
+        self._tools: list[AsyncWebTool] = []
+
+    # ──────────── async context manager ──────────────────────────────────────
+
+    async def __aenter__(self) -> "BrowserPool":
+        loop = asyncio.get_running_loop()
+
+        # Lazy import so web_tool.py has no hard dep on tools.browser at module
+        # load time (avoids circular-import issues when running tests).
+        try:
+            from tools.browser import BrowserCDP, find_free_port
+        except ImportError:
+            from browser import BrowserCDP, find_free_port  # type: ignore[no-redef]
+
+        for i in range(self.size):
+            port = find_free_port(preferred=self.port_start + i * 10)
+            browser = BrowserCDP(port=port, headless=self.headless)
+            # BrowserCDP.start() is blocking (polls until port is open)
+            await loop.run_in_executor(None, browser.start)
+            # Allow Chrome's initial blank tab to register in /json
+            await asyncio.sleep(1.5)
+            tool = AsyncWebTool(port=port)
+            await tool.connect()
+            self._browsers.append(browser)
+            self._tools.append(tool)
+
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: Any,
+        exc_val: Any,
+        exc_tb: Any,
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        for tool in self._tools:
+            try:
+                await tool.close()
+            except Exception:
+                pass
+        for browser in self._browsers:
+            try:
+                await loop.run_in_executor(None, browser.stop)
+            except Exception:
+                pass
+        self._browsers.clear()
+        self._tools.clear()
+
+    # ──────────── parallel dispatch ───────────────────────────────────────────
+
+    async def map(
+        self,
+        fn: "Callable[..., Coroutine[Any, Any, Any]]",
+        args_list: "list[Any]",
+    ) -> "list[Any]":
+        """Run ``fn(async_web_tool, arg)`` for every item in *args_list*.
+
+        Tasks run in parallel, capped at ``size`` concurrent executions.
+        Tools are distributed via an asyncio.Queue so each running task holds
+        exclusive access to one ``AsyncWebTool`` for the duration of its call.
+
+        Parameters
+        ----------
+        fn        : async callable with signature ``async def fn(web, arg)``
+        args_list : positional arguments forwarded as the second parameter
+        """
+        if not self._tools:
+            raise WebToolError("BrowserPool.map(): pool not started — use 'async with'")
+
+        queue: asyncio.Queue = asyncio.Queue()
+        for tool in self._tools:
+            await queue.put(tool)
+
+        async def _run(arg: Any) -> Any:
+            tool = await queue.get()
+            try:
+                return await fn(tool, arg)
+            finally:
+                await queue.put(tool)
+
+        return list(
+            await asyncio.gather(*[_run(arg) for arg in args_list])
+        )
+
+    # ──────────── introspection ───────────────────────────────────────────────
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+    def __repr__(self) -> str:
+        return (
+            f"BrowserPool(size={self.size}, active={len(self._tools)}, "
+            f"headless={self.headless})"
+        )
 
 
 # ──────────────────────────────────────────────────────────────────────────────

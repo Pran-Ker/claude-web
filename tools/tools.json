@@ -11,7 +11,7 @@
   },
   {
     "name": "click",
-    "description": "Click the first element matching selector. Uses Runtime.evaluate + DOM.requestNode so all CSS3 pseudo-selectors (:first-child, :nth-child, etc.) work. Raises WebToolError if the element is not found.",
+    "description": "Click the first element matching selector. Uses a single Runtime.evaluate call with getBoundingClientRect() — double-quoted JS delimiter so attribute selectors containing single quotes (e.g. a[href='/login']) work correctly. Scrolls element into view before measuring. Raises WebToolError if not found.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -97,7 +97,7 @@
   },
   {
     "name": "hover",
-    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Uses Runtime.evaluate for robust CSS3 selector support.",
+    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Uses getBoundingClientRect() for reliable coordinates across all CSS3 pseudo-selectors including :first-child and :nth-child. Calls scrollIntoView() first.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -223,19 +223,20 @@
   },
   {
     "name": "browser_pool",
-    "description": "Create and manage a pool of N independent headless Chrome processes with thread-safe acquire/release semantics for parallel task execution.",
+    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. Importable as 'from tools.web_tool import BrowserPool'.",
     "parameters": {
-      "size": { "type": "number", "default": 3, "description": "Number of Chrome processes in the pool" },
+      "size": { "type": "number", "default": 2, "description": "Number of Chrome processes in the pool" },
       "headless": { "type": "boolean", "default": true },
       "port_start": { "type": "number", "default": 9300 }
     },
-    "implementation": "from tools.browser_pool import BrowserPool; pool = BrowserPool(size=3); pool.start(); web = pool.acquire(); ...; pool.release(web); pool.stop()",
-    "bash_usage": "python3 -c \"from tools.browser_pool import BrowserPool; pool = BrowserPool(size=2); pool.start(); web = pool.acquire(); web.go('https://example.com'); print(web.js('document.title')); pool.release(web); pool.stop()\"",
-    "context_manager": "with pool.borrow() as web: web.go('https://example.com')"
+    "implementation": "from tools.web_tool import BrowserPool\n\nasync with BrowserPool(size=2) as pool:\n    results = await pool.map(async_fn, [url1, url2])",
+    "bash_usage": "python3 -c \"\nimport asyncio\nfrom tools.web_tool import BrowserPool, AsyncWebTool\n\nasync def fetch(web, url):\n    await web.go_async(url)\n    return await web.js_async('document.title')\n\nasync def main():\n    async with BrowserPool(size=2) as pool:\n        titles = await pool.map(fetch, ['https://example.com', 'https://quotes.toscrape.com'])\n    print(titles)\n\nasyncio.run(main())\n\"",
+    "map_signature": "async def fn(web: AsyncWebTool, arg: Any) -> Any",
+    "note": "Requires 'pip install websockets'. For sync usage, use tools.browser_pool.BrowserPool instead."
   },
   {
     "name": "async_web_tool",
-    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, fill_async, wait_async, screenshot_async.",
+    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, fill_async, wait_async, screenshot_async. Used internally by BrowserPool.",
     "parameters": {
       "port": { "type": "number", "default": 9222 }
     },
