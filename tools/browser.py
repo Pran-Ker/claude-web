@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Minimal Chrome CDP launcher with multi‑browser management and pretty logging.
+Minimal Chrome CDP launcher with multi-browser management and pretty logging.
+
+Unchanged from baseline — no modifications required for Generation 1.
 """
 
 import logging

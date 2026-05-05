@@ -1,44 +1,48 @@
 [
   {
     "name": "navigate",
-    "description": "Load the given URL in the active tab",
-    "parameters": { 
-      "url": { "type": "string" } 
+    "description": "Load the given URL in the active tab and wait for the page load event (event-driven, no fixed sleep).",
+    "parameters": {
+      "url": { "type": "string" }
     },
     "implementation": "web.go(url)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.close()\""
   },
   {
     "name": "click",
-    "description": "Click the first element matching selector",
+    "description": "Click the first element matching selector. Raises WebToolError if the element is not found.",
     "parameters": {
       "selector": { "type": "string" }
     },
     "implementation": "web.click(selector)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('selector'); web.close()\"",
-    "fallback": "Coordinate clicking when selector fails"
+    "fallback": "Use coordinate_click when selector fails"
   },
   {
     "name": "type",
-    "description": "Type text into the element matched by selector",
+    "description": "Type text into the element matched by selector.",
     "parameters": {
       "selector": { "type": "string" },
       "text": { "type": "string" }
     },
-    "implementation": "web.fill(selector, text) or web.click(selector); web.type(text)",
+    "implementation": "web.fill(selector, text)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.fill('selector', 'text'); web.close()\""
   },
   {
     "name": "screenshot",
-    "description": "Take full-page PNG and return the local file path",
-    "parameters": {},
-    "implementation": "web.screenshot('screenshots/filename.png')",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.screenshot('screenshots/debug.png'); web.close()\"",
-    "note": "Use sparingly - only for debugging when DOM inspection fails"
+    "description": "Take a JPEG screenshot and return the local file path (or raw base-64 if no filename given).",
+    "parameters": {
+      "filename": { "type": "string", "optional": true },
+      "quality": { "type": "number", "default": 80 },
+      "format": { "type": "string", "default": "jpeg" }
+    },
+    "implementation": "web.screenshot('screenshots/filename.jpg')",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.screenshot('screenshots/debug.jpg'); web.close()\"",
+    "note": "Use sparingly — only when DOM inspection is insufficient."
   },
   {
     "name": "key",
-    "description": "Press a keyboard key (Tab, Enter, etc.)",
+    "description": "Press a keyboard key (Tab, Enter, Escape, ArrowDown, ArrowUp, etc.).",
     "parameters": {
       "key": { "type": "string" }
     },
@@ -48,66 +52,116 @@
   },
   {
     "name": "execute_js",
-    "description": "Execute JavaScript code and return result",
+    "description": "Evaluate JavaScript in the page context and return the result. Wrap objects/arrays in JSON.stringify().",
     "parameters": {
       "code": { "type": "string" }
     },
     "implementation": "web.js(code)",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); result = web.js('code'); print(result); web.close()\"",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); print(web.js('document.title')); web.close()\"",
     "common_usage": [
-      "document.querySelectorAll('input').length",
+      "document.title",
+      "window.location.href",
       "document.body.textContent",
-      "window.location.href"
+      "JSON.stringify([...document.querySelectorAll('a')].map(a=>a.href))"
     ]
   },
   {
-    "name": "verify_completion",
-    "description": "Check if task completed successfully",
+    "name": "wait",
+    "description": "Poll for a CSS selector at 0.1 s intervals; returns True as soon as the element appears, False on timeout.",
     "parameters": {
-      "initial_url": { "type": "string" },
-      "success_keywords": { "type": "array" }
+      "selector": { "type": "string" },
+      "timeout": { "type": "number", "default": 10 }
     },
-    "implementation": "Check URL changes and page content for success indicators",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); final_url = web.js('window.location.href'); page_text = web.js('document.body.textContent.toLowerCase()'); success = any(keyword in page_text for keyword in ['success', 'complete', 'confirmed', 'booked']); print(f'URL changed: {final_url != initial_url}, Success found: {success}'); web.close()\""
+    "implementation": "web.wait(selector, timeout)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); found = web.wait('.my-class', 15); print(found); web.close()\""
+  },
+  {
+    "name": "scroll",
+    "description": "Scroll the page in a given direction by a number of pixels. Useful for revealing lazy-loaded content.",
+    "parameters": {
+      "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "default": "down" },
+      "pixels": { "type": "number", "default": 500 }
+    },
+    "implementation": "web.scroll(direction, pixels)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.scroll('down', 800); web.close()\""
+  },
+  {
+    "name": "hover",
+    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.hover(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.hover('nav .menu-item'); web.close()\""
+  },
+  {
+    "name": "select_option",
+    "description": "Set a <select> dropdown to the option with the given value attribute, then fire a change event.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "value": { "type": "string" }
+    },
+    "implementation": "web.select_option(selector, value)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.select_option('#country', 'US'); web.close()\""
+  },
+  {
+    "name": "find_by_text",
+    "description": "Find the first element whose visible text exactly matches the given string. Returns {tagName, selector} or null.",
+    "parameters": {
+      "text": { "type": "string" },
+      "tag": { "type": "string", "default": "*", "description": "Optional tag name to narrow the search (e.g. 'button', 'a', 'li')" }
+    },
+    "implementation": "web.find_by_text(text, tag)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); info = web.find_by_text('Sign in', 'button'); print(info); web.close()\""
+  },
+  {
+    "name": "click_by_text",
+    "description": "Find the first element with the given visible text and click it. Raises WebToolError if not found.",
+    "parameters": {
+      "text": { "type": "string" },
+      "tag": { "type": "string", "default": "*", "description": "Optional tag name to narrow the search" }
+    },
+    "implementation": "web.click_by_text(text, tag)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click_by_text('Submit', 'button'); web.close()\""
   },
   {
     "name": "coordinate_click",
-    "description": "Click at specific x,y coordinates (fallback method)",
+    "description": "Click at specific x,y page coordinates. Fallback when CSS selectors cannot identify the target.",
     "parameters": {
       "x": { "type": "number" },
       "y": { "type": "number" }
     },
-    "implementation": "web.cmd('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1})",
+    "implementation": "web.cmd('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1}); web.cmd('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': x, 'y': y, 'button': 'left', 'clickCount': 1})",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.cmd('Input.dispatchMouseEvent', {'type': 'mousePressed', 'x': 400, 'y': 200, 'button': 'left', 'clickCount': 1}); web.cmd('Input.dispatchMouseEvent', {'type': 'mouseReleased', 'x': 400, 'y': 200, 'button': 'left', 'clickCount': 1}); web.close()\"",
-    "when_to_use": "When CSS selectors fail or JavaScript execution fails"
-  },
-  {
-    "name": "wait",
-    "description": "Wait for element to appear or page to load",
-    "parameters": {
-      "selector": { "type": "string", "optional": true },
-      "timeout": { "type": "number", "default": 10 }
-    },
-    "implementation": "web.wait(selector, timeout) or time.sleep(seconds)",
-    "bash_usage": "python3 -c \"import time; time.sleep(3)\" or web.wait('selector', 10)"
+    "when_to_use": "When CSS selectors fail or JavaScript execution fails."
   },
   {
     "name": "get_page_info",
-    "description": "Get basic page information for debugging",
+    "description": "Return basic page metadata: URL, title, input count, button count.",
     "parameters": {},
-    "implementation": "web.js('({url: window.location.href, title: document.title, inputCount: document.querySelectorAll(\"input\").length, buttonCount: document.querySelectorAll(\"button\").length})')",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); info = web.js('({url: window.location.href, title: document.title, inputCount: document.querySelectorAll(\\\"input\\\").length, buttonCount: document.querySelectorAll(\\\"button\\\").length})'); print(info); web.close()\""
+    "implementation": "web.js('JSON.stringify({url: window.location.href, title: document.title, inputCount: document.querySelectorAll(\"input\").length, buttonCount: document.querySelectorAll(\"button\").length})')",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); print(json.loads(web.js('JSON.stringify({url: window.location.href, title: document.title})'))); web.close()\""
+  },
+  {
+    "name": "verify_completion",
+    "description": "Check if task completed successfully by inspecting URL change and presence of success keywords in page text.",
+    "parameters": {
+      "initial_url": { "type": "string" },
+      "success_keywords": { "type": "array", "items": { "type": "string" } }
+    },
+    "implementation": "Compare web.js('window.location.href') with initial_url; search web.js('document.body.textContent.toLowerCase()') for success_keywords.",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); final_url = web.js('window.location.href'); page_text = web.js('document.body.textContent.toLowerCase()'); success = any(k in page_text for k in ['success','complete','confirmed']); print(f'URL changed: {final_url != initial_url}, Success: {success}'); web.close()\""
   },
   {
     "name": "clone_website",
-    "description": "Create pixel-perfect website replica with all assets",
+    "description": "Create a pixel-perfect website replica with all assets.",
     "parameters": {
       "url": { "type": "string" },
       "name": { "type": "string" }
     },
-    "implementation": "Follow clone/CLONING_PROTOCOL.md for systematic high-fidelity cloning",
+    "implementation": "Follow clone/CLONING_PROTOCOL.md for systematic high-fidelity cloning.",
     "protocol_file": "clone/CLONING_PROTOCOL.md",
-    "bash_usage": "Use WebTool + WebFetch + Write following the complete protocol",
-    "note": "Perfect replica cloning - not just content extraction"
+    "bash_usage": "Use WebTool + WebFetch + Write following the complete protocol.",
+    "note": "Perfect replica cloning — not just content extraction."
   }
 ]
