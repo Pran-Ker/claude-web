@@ -1,0 +1,21 @@
+feat(gen-7): add Network-domain SPA support — enable_network_logging, wait_for_request, wait_for_response
+
+- **`enable_network_logging()` (sync + async)**: Calls `Network.enable` via CDP, resets `_network_log`, and sets `_network_logging = True`. All CDP events that flow through `cmd()`, `go()`, and `_wait_for_any_event()` are now automatically routed through the new `_dispatch_event()` hook, which appends `Network.requestWillBeSent`, `Network.responseReceived`, `Network.loadingFinished`, and `Network.loadingFailed` entries to the in-process log. No trajectory failure in Gen 6 — this is a proactive capability addition for SPA tasks where DOM inspection is insufficient and XHR/fetch content must be read directly.
+
+- **`get_network_log() → list[dict]` (sync + async)**: Returns a snapshot copy of all collected network entries since the last `enable_network_logging()` call. In the sync version, `_drain_events()` is flushed first to capture any events that arrived between cmd() calls (edge case). Entries carry: `type`, `timestamp`, `requestId`, `url`, plus type-specific fields (`method`/`resourceType` for requests; `status`/`mimeType`/`resourceType` for responses; `encodedDataLength` for loadingFinished; `errorText` for loadingFailed).
+
+- **`wait_for_request(pattern, timeout=15) → Optional[dict]`**: Checks the existing log first (O(n) scan, returns immediately if the request already fired), then enters a raw `ws.recv()` polling loop matching `Network.requestWillBeSent` events whose URL contains `pattern`. Calls `enable_network_logging()` automatically if not already enabled. All events received while waiting are also forwarded to `_pending_events` and `_dispatch_event()` so no events are lost. Returns the matching entry dict or `None` on timeout.
+
+- **`wait_for_response(pattern, timeout=15) → Optional[dict]`**: First checks existing log for a `responseReceived` entry with a matching URL whose `requestId` also appears in a `loadingFinished` entry (i.e. body already available). Otherwise polls the WebSocket, waiting for `responseReceived` matching `pattern` and then `loadingFinished` (or `loadingFailed`) with the same `requestId`. After `loadingFinished`, calls `Network.getResponseBody(requestId)` to populate `body_preview` (first 500 chars). On timeout returns any partial response-header entry with a best-effort body fetch. Returns `None` if no matching response arrived at all.
+
+- **`_dispatch_event(event)` (sync) / `_dispatch_event_async(event)` (async)**: New internal hook called in `cmd()`, `go()`, and `_wait_for_any_event()` (sync); in `_recv_loop()` (async). Centralises event routing so network logging works regardless of which execution path receives the raw WebSocket frame. The hook is a no-op when `_network_logging` is False, adding zero overhead to the existing code paths when network logging is disabled.
+
+- **`_NETWORK_EVENT_METHODS` frozenset**: Centralised set of the four Network domain event names checked in `_dispatch_event`. Allows O(1) membership tests and makes it trivial to extend logging to additional event types in future generations.
+
+- **`_try_fetch_body(entry)` (sync) / `_try_fetch_body_async(entry)` (async)**: Best-effort helper that calls `Network.getResponseBody` and stores up to 500 chars in `entry["body_preview"]`. Silently ignores errors (body may not yet be available, or may be a non-capturable binary resource).
+
+- **`switch_tab()` — Network.enable re-sent**: When `_network_logging` is True and `switch_tab()` reconnects the WebSocket to a different tab, `Network.enable` is re-issued on the new connection so logging continues seamlessly across tab switches.
+
+- **AsyncWebTool `_recv_loop`**: Now calls `await self._dispatch_event_async(msg)` for every incoming event before notifying user-registered listeners, ensuring the network log is populated in real time without requiring any additional listener registration from user code.
+
+- **`tools.json`**: Three new tool entries documented — `enable_network_logging`, `get_network_log`, `wait_for_request`, `wait_for_response` — each with full parameter schemas, implementation examples, bash usage snippets, and field-level documentation. Existing `navigate`, `switch_tab`, `wait_for_navigation`, `async_web_tool`, `browser_pool` descriptions updated to mention Gen 7 network-logging integration.

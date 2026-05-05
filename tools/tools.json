@@ -1,7 +1,7 @@
 [
   {
     "name": "navigate",
-    "description": "Load the given URL in the active tab and wait for a page-load signal (Page.loadEventFired OR Page.frameStoppedLoading, whichever fires first). Falls back to document.readyState check before giving up. After load, injects the querySelector :first-child→:first-of-type shim into the page.",
+    "description": "Load the given URL in the active tab and wait for a page-load signal (Page.loadEventFired OR Page.frameStoppedLoading, whichever fires first). Falls back to document.readyState check before giving up. After load, injects the querySelector :first-child→:first-of-type shim into the page. If network logging is enabled, events fired during navigation are captured automatically.",
     "parameters": {
       "url": { "type": "string" },
       "timeout": { "type": "number", "default": 30, "description": "Max seconds to wait for load" }
@@ -126,7 +126,7 @@
   },
   {
     "name": "wait_for_navigation",
-    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation. Re-injects the querySelector shim after navigation.",
+    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation. Re-injects the querySelector shim after navigation. All CDP events received while waiting are also routed through _dispatch_event so network logging continues seamlessly.",
     "parameters": {
       "timeout": { "type": "number", "default": 15 }
     },
@@ -154,7 +154,7 @@
   },
   {
     "name": "hover",
-    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Gen 6 two-layer approach: (1) Input.dispatchMouseEvent(mouseMoved); (2) CSS.forcePseudoState applied to the hovered node AND its ancestors (up to 5 levels). Ancestor hovering ensures CSS rules like '.figure:hover .figcaption { display:block }' activate when you hover a child element (e.g. the img inside .figure). Uses the fallback-chain: exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes.",
+    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Two-layer approach: (1) Input.dispatchMouseEvent(mouseMoved); (2) CSS.forcePseudoState applied to the hovered node AND its ancestors (up to 5 levels). Ancestor hovering ensures CSS rules like '.figure:hover .figcaption { display:block }' activate when you hover a child element. Uses the fallback-chain: exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -311,7 +311,7 @@
   },
   {
     "name": "switch_tab",
-    "description": "Reconnect the WebSocket to the tab identified by tab_id. All subsequent commands operate on that tab. Re-injects the querySelector shim after switching.",
+    "description": "Reconnect the WebSocket to the tab identified by tab_id. All subsequent commands operate on that tab. Re-injects the querySelector shim after switching. If network logging was active, Network.enable is re-sent to the new tab connection.",
     "parameters": {
       "tab_id": { "type": "string" }
     },
@@ -333,6 +333,57 @@
     "parameters": {},
     "implementation": "web.get_open_tabs()",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); print(json.dumps(web.get_open_tabs(), indent=2)); web.close()\""
+  },
+  {
+    "name": "enable_network_logging",
+    "description": "Enable CDP Network domain and start collecting all network events (requests, responses, failures) into an in-process log. Call this BEFORE navigating so events during page load are captured. Resets the log on each call. All subsequent cmd()/go()/wait_* calls automatically route Network.* events to the log without additional user code.",
+    "parameters": {},
+    "implementation": "web.enable_network_logging()",
+    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool; import json\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://quotes.toscrape.com')\nlog = web.get_network_log()\nprint(f'Captured {len(log)} events')\nprint(json.dumps([e for e in log if e[\\\"type\\\"] == \\\"Network.responseReceived\\\"][:3], indent=2))\nweb.close()\n\"",
+    "note": "Must be called before navigation to capture page-load requests. Log persists across navigations until enable_network_logging() is called again."
+  },
+  {
+    "name": "get_network_log",
+    "description": "Return all network events collected since the last enable_network_logging() call as a list of dicts. Each entry has at minimum: type, timestamp, requestId, url. Requests also have: method, resourceType. Responses also have: status, mimeType, resourceType. loadingFinished entries have encodedDataLength. loadingFailed entries have errorText.",
+    "parameters": {},
+    "implementation": "log = web.get_network_log()",
+    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool; import json\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://quotes.toscrape.com')\nlog = web.get_network_log()\nxhr = [e for e in log if e['type'] == 'Network.responseReceived']\nprint(json.dumps(xhr[:5], indent=2))\nweb.close()\n\"",
+    "entry_types": {
+      "Network.requestWillBeSent": "url, method, resourceType, requestId, timestamp",
+      "Network.responseReceived": "url, status, mimeType, resourceType, requestId, timestamp",
+      "Network.loadingFinished": "requestId, encodedDataLength, timestamp",
+      "Network.loadingFailed": "requestId, errorText, resourceType, timestamp"
+    }
+  },
+  {
+    "name": "wait_for_request",
+    "description": "Block until a network request whose URL contains the given pattern fires. Checks the already-collected log first (returns immediately if already seen), then polls the WebSocket for new events. enable_network_logging() is called automatically if not yet enabled. Returns a dict with keys: type, url, method, resourceType, requestId, timestamp — or None on timeout. Ideal for confirming that a SPA triggered an API call after a user action.",
+    "parameters": {
+      "pattern": { "type": "string", "description": "Substring to match against the full request URL (e.g. '/api/search', '.json')" },
+      "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait" }
+    },
+    "implementation": "req = web.wait_for_request('/api/data', timeout=10)",
+    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://spa.example.com')\nweb.click('#load-data')\nreq = web.wait_for_request('/api/items', timeout=10)\nif req:\n    print('API called:', req['url'])\nweb.close()\n\"",
+    "note": "Call enable_network_logging() before navigation to avoid missing early requests."
+  },
+  {
+    "name": "wait_for_response",
+    "description": "Block until a complete network response (headers + body loaded) whose URL contains the given pattern is available. Waits for Network.responseReceived then Network.loadingFinished for the same requestId, then fetches up to 500 chars of the response body via Network.getResponseBody. Returns {url, status, mimeType, resourceType, requestId, body_preview} or None on timeout. enable_network_logging() is called automatically if not yet enabled.",
+    "parameters": {
+      "pattern": { "type": "string", "description": "Substring to match against the full response URL (e.g. '/api/search', '.json')" },
+      "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait for the complete response" }
+    },
+    "implementation": "resp = web.wait_for_response('/api/items', timeout=10)",
+    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://spa.example.com')\nweb.click('#load-data')\nresp = web.wait_for_response('/api/items', timeout=10)\nif resp:\n    print(resp['status'], resp['body_preview'][:200])\nweb.close()\n\"",
+    "return_fields": {
+      "url": "Full response URL",
+      "status": "HTTP status code (int)",
+      "mimeType": "Content-Type mime type string",
+      "resourceType": "CDP resource type (XHR, Fetch, Document, etc.)",
+      "requestId": "CDP request ID for further lookups",
+      "body_preview": "First 500 characters of the decoded response body (empty string if unavailable)"
+    },
+    "note": "body_preview is populated only for text responses where Network.getResponseBody succeeds. Binary/encoded responses may have an empty body_preview."
   },
   {
     "name": "coordinate_click",
@@ -364,7 +415,7 @@
   },
   {
     "name": "browser_pool",
-    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. AsyncWebTool.hover_async() forces :hover on node + ancestors (gen 6). AsyncWebTool gains login_async, fill_form_async, paginate_async, wait_for_url_change_async.",
+    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. AsyncWebTool gains enable_network_logging_async, get_network_log_async, wait_for_request_async, wait_for_response_async for SPA network inspection in async tasks.",
     "parameters": {
       "size": { "type": "number", "default": 2, "description": "Number of Chrome processes in the pool" },
       "headless": { "type": "boolean", "default": true },
@@ -377,11 +428,11 @@
   },
   {
     "name": "async_web_tool",
-    "description": "Fully async CDP browser automation via AsyncWebTool. Gen 6: adds login_async, fill_form_async, paginate_async, wait_for_url_change_async. hover_async() forces :hover on hovered node AND ancestors (up to 5 levels). querySelector shim injected on connect and after each navigation.",
+    "description": "Fully async CDP browser automation via AsyncWebTool. Gen 7 adds: enable_network_logging_async(), get_network_log_async(), wait_for_request_async(pattern, timeout), wait_for_response_async(pattern, timeout). Network events are dispatched in _recv_loop so they are captured even when no command is in flight. hover_async() forces :hover on hovered node AND ancestors. querySelector shim injected on connect and after each navigation.",
     "parameters": {
       "port": { "type": "number", "default": 9222 }
     },
-    "implementation": "from tools.web_tool import AsyncWebTool; web = AsyncWebTool(port=9222); await web.connect(); await web.go_async('URL'); title = await web.js_async('document.title'); await web.close()",
+    "implementation": "from tools.web_tool import AsyncWebTool\naweb = AsyncWebTool(port=9222)\nawait aweb.connect()\nawait aweb.enable_network_logging_async()\nawait aweb.go_async('https://spa.example.com')\nawait aweb.click_async('#load')\nresp = await aweb.wait_for_response_async('/api/data', timeout=10)\nprint(resp)\nawait aweb.close()",
     "bash_usage": "python3 -c \"import asyncio; from tools.web_tool import AsyncWebTool\nasync def main():\n    web = AsyncWebTool(9222)\n    await web.connect()\n    await web.go_async('https://example.com')\n    print(await web.js_async('document.title'))\n    await web.close()\nasyncio.run(main())\"",
     "requires": "pip install websockets"
   },

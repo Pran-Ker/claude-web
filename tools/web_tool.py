@@ -1,71 +1,57 @@
 """
-web_tool.py — Generation 6 WebTool built on Chrome DevTools Protocol (CDP).
+web_tool.py — Generation 7 WebTool built on Chrome DevTools Protocol (CDP).
 
-Changes over Generation 5
+Changes over Generation 6
 --------------------------
-T2d fix — Two-part fix for "Hover did not reveal caption":
+Network-level SPA support — three new features built on the CDP Network domain:
 
-  Part A — querySelector :first-child shim (root cause of the null result):
-    The benchmark's verification step calls
-      js("document.querySelector('.figure:first-child .figcaption') ? ... : null")
-    which returns null because an <h3> precedes the .figure divs in the DOM,
-    making them NOT the :first-child of their container.  js() does not run
-    selectors through the tool's fallback chain.
+  enable_network_logging() → None
+    Calls Network.enable, resets the in-process network log, and sets an
+    internal flag so that every CDP event dispatched through cmd() or the
+    waiting loops is automatically routed to the network log.  The log
+    captures Network.requestWillBeSent, Network.responseReceived,
+    Network.loadingFinished, and Network.loadingFailed events with their
+    key metadata fields.
 
-    Gen 6 injects a lightweight querySelector/querySelectorAll shim into every
-    page via Page.addScriptToEvaluateOnNewDocument (registered once during
-    connect()) and executed immediately after each navigation.  The shim
-    patches document.querySelector / document.querySelectorAll so that when a
-    selector containing ':first-child' returns no element, it automatically
-    retries with ':first-of-type' substituted.  This makes ALL querySelector
-    calls — including those in raw js() expressions — benefit from the
-    fallback without altering successful matches.
+  get_network_log() → list[dict]
+    Returns a copy of all collected network-event entries since the last
+    enable_network_logging() call.  Each entry is a dict with at minimum:
+      type, timestamp, requestId, url.
+    Requests additionally carry: method, resourceType.
+    Responses additionally carry: status, mimeType, resourceType, body_preview
+      (populated by a best-effort Network.getResponseBody call).
 
-  Part B — ancestor :hover forcing (CSS rule targeting parent containers):
-    CSS rules like `.figure:hover .figcaption { display:block }` require the
-    .figure container to have :hover, not the child img.  Gen 5's
-    CSS.forcePseudoState only applied :hover to the node at the hovered
-    coordinates (the img), leaving the parent .figure without :hover.
+  wait_for_request(pattern, timeout=15) → Optional[dict]
+    Blocks until a Network.requestWillBeSent event fires whose URL contains
+    the given pattern string.  Checks the already-collected log first, then
+    polls the WebSocket.  Returns the matching log entry or None on timeout.
+    enable_network_logging() must be called before navigation; otherwise
+    wait_for_request() will call it automatically.
 
-    Gen 6 now walks up to 6 ancestor levels from the hovered node and calls
-    CSS.forcePseudoState(["hover"]) on each, so the entire ancestor chain
-    carries the :hover state.  This ensures CSS rules on any parent container
-    remain active after hover() returns.
+  wait_for_response(pattern, timeout=15) → Optional[dict]
+    Blocks until a full response (responseReceived + loadingFinished) whose
+    URL contains pattern is available.  After the response headers arrive,
+    waits up to the remaining timeout for loadingFinished, then calls
+    Network.getResponseBody to populate body_preview (first 500 chars).
+    Returns {url, status, mimeType, resourceType, body_preview, requestId}
+    or None on timeout.  enable_network_logging() is called automatically
+    if not already enabled.
 
-Gen 6 composite high-level methods (generation focus):
+AsyncWebTool additions (mirroring the sync API):
+  enable_network_logging_async()
+  get_network_log_async() → list[dict]
+  wait_for_request_async(pattern, timeout=15) → Optional[dict]
+  wait_for_response_async(pattern, timeout=15) → Optional[dict]
 
-  login(url, user_sel, username, pass_sel, password, submit_sel) → bool
-    All-in-one login: navigate → fill username → fill password → click submit
-    → wait for navigation → return True if URL changed.  Dramatically
-    simplifies T4a-style tasks.
-
-  fill_form(field_map: dict[str, str]) → None
-    Fill multiple form fields in one call.  Detects field type per selector:
-    <select> → select_option(), checkbox/radio → click if truthy value,
-    everything else → fill().  Returns early with WebToolError if any field
-    is not found.
-
-  paginate(next_selector, extractor_fn, max_pages=10) → list
-    Automatically paginate through multi-page results.  Calls extractor_fn(web)
-    on each page, clicks next_selector if present, waits for navigation, and
-    collects results.  Stops when next_selector disappears or max_pages
-    reached.  Simplifies T3b-style tasks to a single call.
-
-  wait_for_url_change(timeout=15) → str
-    Capture current URL, poll at 0.1 s intervals until href differs, return
-    new URL.  Falls back to current URL on timeout.  Useful after click()
-    when you need to confirm navigation happened before reading page content.
-
-Other improvements:
-  - _SELECTOR_SHIM_JS constant — idempotent shim with window.__cdpSelectorShim
-    guard so repeated injection is a no-op.
-  - _install_selector_shim() helper — registers shim via
-    Page.addScriptToEvaluateOnNewDocument and runs it on the current page.
-  - _force_hover_at() now walks ancestors via DOM.describeNode and forces
-    :hover on up to 6 levels (node + 5 parents).
-  - async _force_hover_at_async() updated with same ancestor logic.
-  - AsyncWebTool gains async equivalents of the four composite methods:
-    login_async, fill_form_async, paginate_async, wait_for_url_change_async.
+Internal changes:
+  _dispatch_event(event) — new method called in cmd(), go(), and all
+    _wait_for_* loops so that network events are recorded in real time
+    regardless of which synchronous path is executing.
+  _NETWORK_EVENT_METHODS frozenset — centralised set of Network.* event
+    names that are interesting for the log.
+  _try_fetch_body(entry, request_id) — helper that calls
+    Network.getResponseBody; stores result in entry["body_preview"].
+  All generation-6 behaviour is preserved unchanged.
 """
 
 from __future__ import annotations
@@ -89,6 +75,14 @@ import websocket
 _LOAD_SIGNALS: frozenset[str] = frozenset({
     "Page.loadEventFired",
     "Page.frameStoppedLoading",
+})
+
+# Network domain events we care about for logging
+_NETWORK_EVENT_METHODS: frozenset[str] = frozenset({
+    "Network.requestWillBeSent",
+    "Network.responseReceived",
+    "Network.loadingFinished",
+    "Network.loadingFailed",
 })
 
 # Regex to strip structural pseudo-classes from CSS selectors.
@@ -212,6 +206,11 @@ class WebTool:
         self._css_enabled = False
         self._shim_script_id: Optional[str] = None
 
+        # Network logging state
+        self._network_logging: bool = False
+        self._network_lock = threading.Lock()
+        self._network_log: list[dict] = []
+
     # ──────────────────────────── connection ─────────────────────────────────
 
     def connect(self, tab_index: int = 0):
@@ -245,6 +244,8 @@ class WebTool:
             raw = self.ws.recv()
             response = json.loads(raw)
             if "method" in response:
+                # Dispatch to network logger before buffering
+                self._dispatch_event(response)
                 with self._event_lock:
                     self._pending_events.append(response)
                 continue
@@ -278,6 +279,7 @@ class WebTool:
 
             response = json.loads(raw)
             if "method" in response:
+                self._dispatch_event(response)
                 if response["method"] in event_methods:
                     return response["method"]
                 with self._event_lock:
@@ -286,15 +288,338 @@ class WebTool:
         self.ws.settimeout(None)
         return None
 
+    # ──────────────────────────── network event dispatch ─────────────────────
+
+    def _dispatch_event(self, event: dict) -> None:
+        """Route CDP events to registered handlers (currently: network logger)."""
+        if not self._network_logging:
+            return
+        method = event.get("method", "")
+        if method not in _NETWORK_EVENT_METHODS:
+            return
+        self._handle_network_event(event)
+
+    def _handle_network_event(self, event: dict) -> None:
+        """Parse a Network.* CDP event and append an entry to _network_log."""
+        method = event.get("method", "")
+        params = event.get("params", {})
+
+        entry: dict = {
+            "type": method,
+            "timestamp": params.get("timestamp", 0),
+            "requestId": params.get("requestId", ""),
+        }
+
+        if method == "Network.requestWillBeSent":
+            req = params.get("request", {})
+            entry["url"] = req.get("url", "")
+            entry["method"] = req.get("method", "GET")
+            entry["resourceType"] = params.get("type", "")
+        elif method == "Network.responseReceived":
+            resp = params.get("response", {})
+            entry["url"] = resp.get("url", "")
+            entry["status"] = resp.get("status", 0)
+            entry["mimeType"] = resp.get("mimeType", "")
+            entry["resourceType"] = params.get("type", "")
+        elif method == "Network.loadingFinished":
+            entry["url"] = ""
+            entry["encodedDataLength"] = params.get("encodedDataLength", 0)
+        elif method == "Network.loadingFailed":
+            entry["url"] = ""
+            entry["errorText"] = params.get("errorText", "")
+            entry["resourceType"] = params.get("type", "")
+
+        with self._network_lock:
+            self._network_log.append(entry)
+
+    # ──────────────────────────── network public API ──────────────────────────
+
+    def enable_network_logging(self) -> None:
+        """Enable CDP Network domain and start collecting network events.
+
+        Resets the network log and enables the Network domain via CDP.  After
+        this call every network request/response that flows through
+        cmd() / go() / wait_* loops is captured in the internal log and
+        retrievable via get_network_log().
+
+        Call this *before* navigating so that the events emitted during
+        page load are captured.
+
+        Example
+        -------
+        web.enable_network_logging()
+        web.go("https://api.example.com/page")
+        log = web.get_network_log()
+        api_calls = [e for e in log if '/api/' in e.get('url','')]
+        """
+        self.cmd("Network.enable")
+        with self._network_lock:
+            self._network_log = []
+        self._network_logging = True
+
+    def get_network_log(self) -> list[dict]:
+        """Return all collected network-event entries since enable_network_logging().
+
+        Each entry is a dict with at minimum: type, timestamp, requestId, url.
+
+        Entry shapes by type
+        --------------------
+        Network.requestWillBeSent : url, method, resourceType
+        Network.responseReceived  : url, status, mimeType, resourceType
+        Network.loadingFinished   : encodedDataLength
+        Network.loadingFailed     : errorText, resourceType
+
+        Returns
+        -------
+        list[dict]  — snapshot of the log at call time (a copy).
+
+        Example
+        -------
+        log = web.get_network_log()
+        xhr = [e for e in log if e['type'] == 'Network.responseReceived'
+                               and 'xhr' in e.get('resourceType','').lower()]
+        """
+        # Drain any buffered events that arrived while no cmd() was running
+        # (shouldn't happen in normal single-threaded usage, but be safe)
+        for event in self._drain_events():
+            self._dispatch_event(event)
+        with self._network_lock:
+            return list(self._network_log)
+
+    def _try_fetch_body(self, entry: dict) -> None:
+        """Best-effort: populate entry['body_preview'] via Network.getResponseBody."""
+        request_id = entry.get("requestId", "")
+        if not request_id:
+            return
+        try:
+            result = self.cmd("Network.getResponseBody", {"requestId": request_id})
+            body = result.get("result", {}).get("body", "")
+            if body:
+                entry["body_preview"] = body[:500]
+        except Exception:
+            pass  # non-fatal — body may not be available yet
+
+    def wait_for_request(
+        self, pattern: str, timeout: float = 15.0
+    ) -> Optional[dict]:
+        """Block until a network request whose URL contains *pattern* fires.
+
+        Checks the already-collected network log first (so if the request
+        already fired before this call it is returned immediately), then
+        polls the WebSocket for new events.
+
+        ``enable_network_logging()`` is called automatically if it has not
+        been called yet.
+
+        Parameters
+        ----------
+        pattern : str
+            Substring to match against the full request URL.
+        timeout : float
+            Maximum seconds to wait.
+
+        Returns
+        -------
+        dict with keys: type, url, method, resourceType, requestId, timestamp
+        or None if the timeout expires.
+
+        Example
+        -------
+        web.enable_network_logging()
+        web.go("https://spa.example.com")
+        req = web.wait_for_request("/api/data", timeout=10)
+        if req:
+            print("API called:", req['url'])
+        """
+        if not self._network_logging:
+            self.enable_network_logging()
+
+        # Check existing log first
+        with self._network_lock:
+            for entry in self._network_log:
+                if (entry.get("type") == "Network.requestWillBeSent"
+                        and pattern in entry.get("url", "")):
+                    return dict(entry)
+
+        # Poll WebSocket for new events
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                self.ws.settimeout(min(remaining, 0.5))
+                raw = self.ws.recv()
+                self.ws.settimeout(None)
+            except websocket.WebSocketTimeoutException:
+                continue
+            except Exception:
+                self.ws.settimeout(None)
+                break
+
+            msg = json.loads(raw)
+            if "method" not in msg:
+                continue
+
+            self._dispatch_event(msg)
+            with self._event_lock:
+                self._pending_events.append(msg)
+
+            if msg.get("method") == "Network.requestWillBeSent":
+                params = msg.get("params", {})
+                url = params.get("request", {}).get("url", "")
+                if pattern in url:
+                    self.ws.settimeout(None)
+                    return {
+                        "type": "Network.requestWillBeSent",
+                        "url": url,
+                        "method": params.get("request", {}).get("method", "GET"),
+                        "resourceType": params.get("type", ""),
+                        "requestId": params.get("requestId", ""),
+                        "timestamp": params.get("timestamp", 0),
+                    }
+
+        self.ws.settimeout(None)
+        return None
+
+    def wait_for_response(
+        self, pattern: str, timeout: float = 15.0
+    ) -> Optional[dict]:
+        """Block until a network response whose URL contains *pattern* is complete.
+
+        Waits for ``Network.responseReceived`` matching *pattern*, then waits
+        for the corresponding ``Network.loadingFinished`` event (so the body
+        is available), and finally fetches up to 500 characters of the
+        response body via ``Network.getResponseBody``.
+
+        ``enable_network_logging()`` is called automatically if it has not
+        been called yet.
+
+        Parameters
+        ----------
+        pattern : str
+            Substring to match against the full response URL.
+        timeout : float
+            Maximum seconds to wait for the complete response.
+
+        Returns
+        -------
+        dict with keys: url, status, mimeType, resourceType, requestId,
+                        body_preview (str, may be empty)
+        or None if the timeout expires before the matching response arrives.
+
+        Example
+        -------
+        web.enable_network_logging()
+        web.click("button#load-more")
+        resp = web.wait_for_response("/api/items", timeout=10)
+        if resp:
+            print(resp['status'], resp['body_preview'][:200])
+        """
+        if not self._network_logging:
+            self.enable_network_logging()
+
+        # Check existing log — look for a responseReceived already captured
+        matched_entry: Optional[dict] = None
+        matched_request_id: Optional[str] = None
+        loading_finished: bool = False
+
+        with self._network_lock:
+            request_ids_finished: set[str] = {
+                e["requestId"]
+                for e in self._network_log
+                if e.get("type") == "Network.loadingFinished"
+            }
+            for entry in self._network_log:
+                if (entry.get("type") == "Network.responseReceived"
+                        and pattern in entry.get("url", "")):
+                    matched_entry = {
+                        "url": entry.get("url", ""),
+                        "status": entry.get("status", 0),
+                        "mimeType": entry.get("mimeType", ""),
+                        "resourceType": entry.get("resourceType", ""),
+                        "requestId": entry.get("requestId", ""),
+                        "body_preview": "",
+                    }
+                    matched_request_id = entry.get("requestId", "")
+                    if matched_request_id in request_ids_finished:
+                        loading_finished = True
+                    break
+
+        if matched_entry and loading_finished:
+            self._try_fetch_body(matched_entry)
+            return matched_entry
+
+        # Poll WebSocket for new events
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                self.ws.settimeout(min(remaining, 0.5))
+                raw = self.ws.recv()
+                self.ws.settimeout(None)
+            except websocket.WebSocketTimeoutException:
+                # If we already have the response headers, try body even without
+                # loadingFinished (best-effort on timeout)
+                if matched_entry:
+                    self._try_fetch_body(matched_entry)
+                    if matched_entry.get("body_preview"):
+                        return matched_entry
+                continue
+            except Exception:
+                self.ws.settimeout(None)
+                break
+
+            msg = json.loads(raw)
+            if "method" not in msg:
+                continue
+
+            self._dispatch_event(msg)
+            with self._event_lock:
+                self._pending_events.append(msg)
+
+            method = msg.get("method", "")
+            params = msg.get("params", {})
+
+            if method == "Network.responseReceived" and matched_entry is None:
+                resp = params.get("response", {})
+                url = resp.get("url", "")
+                if pattern in url:
+                    matched_entry = {
+                        "url": url,
+                        "status": resp.get("status", 0),
+                        "mimeType": resp.get("mimeType", ""),
+                        "resourceType": params.get("type", ""),
+                        "requestId": params.get("requestId", ""),
+                        "body_preview": "",
+                    }
+                    matched_request_id = params.get("requestId", "")
+
+            elif method == "Network.loadingFinished" and matched_entry is not None:
+                if params.get("requestId") == matched_request_id:
+                    self.ws.settimeout(None)
+                    self._try_fetch_body(matched_entry)
+                    return matched_entry
+
+            elif method == "Network.loadingFailed" and matched_entry is not None:
+                if params.get("requestId") == matched_request_id:
+                    self.ws.settimeout(None)
+                    matched_entry["errorText"] = params.get("errorText", "")
+                    return matched_entry
+
+        self.ws.settimeout(None)
+
+        # Return partial result if we at least got response headers
+        if matched_entry:
+            self._try_fetch_body(matched_entry)
+            return matched_entry
+        return None
+
     # ──────────────────────────── selector shim ──────────────────────────────
 
     def _install_selector_shim(self):
-        """Register the querySelector :first-child shim for all future pages
-        and execute it immediately on the current page.
-
-        The shim is idempotent (guarded by window.__cdpSelectorShim) so calling
-        this multiple times is safe.
-        """
         try:
             result = self.cmd("Page.addScriptToEvaluateOnNewDocument", {
                 "source": _SELECTOR_SHIM_JS,
@@ -303,12 +628,10 @@ class WebTool:
                 result.get("result", {}).get("identifier")
             )
         except Exception:
-            pass  # non-fatal: shim will still be injected per-navigation
-        # Also apply immediately to the current page
+            pass
         self.js(_SELECTOR_SHIM_JS)
 
     def _apply_selector_shim(self):
-        """Re-inject the shim into the current page (called after every go())."""
         self.js(_SELECTOR_SHIM_JS)
 
     # ──────────────────────────── CSS domain ─────────────────────────────────
@@ -353,6 +676,7 @@ class WebTool:
             if msg.get("id") == nav_id:
                 nav_acked = True
             elif "method" in msg:
+                self._dispatch_event(msg)
                 if msg["method"] in _LOAD_SIGNALS:
                     load_fired = True
                 else:
@@ -361,7 +685,6 @@ class WebTool:
 
             if nav_acked and load_fired:
                 self.ws.settimeout(None)
-                # Inject the querySelector shim into the newly loaded page
                 self._apply_selector_shim()
                 return
 
@@ -433,13 +756,7 @@ class WebTool:
         return x, y
 
     def _force_hover_at(self, x: float, y: float, matched_selector: str):
-        """Force CSS :hover on the node at (x, y) AND its ancestors.
-
-        Gen 6 change: walks up to 6 ancestor levels via DOM.describeNode and
-        forces :hover on each, so CSS rules like
-        ``.figure:hover .figcaption { display:block }`` work when the
-        hovered element is a child (e.g. the ``img`` inside ``.figure``).
-        """
+        """Force CSS :hover on the node at (x, y) AND its ancestors."""
         try:
             self._ensure_css_enabled()
             node_info = self.cmd("DOM.getNodeForLocation", {
@@ -454,7 +771,6 @@ class WebTool:
             if not node_id:
                 return
 
-            # Collect node + ancestors (up to 5 levels)
             node_ids: list[int] = [node_id]
             current_id: int = node_id
             for _ in range(5):
@@ -479,9 +795,9 @@ class WebTool:
                         "forcedPseudoClasses": ["hover"],
                     })
                 except Exception:
-                    pass  # individual ancestor may be non-element; safe to skip
+                    pass
         except Exception:
-            pass  # non-fatal
+            pass
 
     # ──────────────────────────── public actions ──────────────────────────────
 
@@ -637,21 +953,7 @@ class WebTool:
         return False
 
     def wait_for_url_change(self, timeout: float = 15.0) -> str:
-        """Wait until window.location.href differs from its current value.
-
-        Captures the URL at call time, then polls at 0.1 s intervals until the
-        URL changes or *timeout* elapses.  Returns the new URL (or the
-        original URL if the timeout expires without a change).
-
-        Typical use: call immediately after click() on a link/button that
-        triggers navigation, then read page content once the URL has settled.
-
-        Example
-        -------
-        web.click("a.nav-link")
-        new_url = web.wait_for_url_change(timeout=10)
-        print(new_url)   # https://example.com/new-page
-        """
+        """Wait until window.location.href differs from its current value."""
         current_url: str = self.js("window.location.href") or ""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -685,16 +987,7 @@ class WebTool:
         })
 
     def hover(self, selector: str):
-        """Move the mouse over *selector* and force CSS :hover on ancestors.
-
-        Gen 6 two-layer hover:
-          1. ``Input.dispatchMouseEvent(mouseMoved)`` — triggers JS
-             mouseover/mouseenter handlers and Chrome's built-in :hover tracking.
-          2. ``CSS.forcePseudoState`` applied to the hovered node AND its
-             ancestors (up to 5 levels) — ensures CSS rules like
-             ``.figure:hover .figcaption { display:block }`` remain active
-             when the caller reads the DOM after hover() returns.
-        """
+        """Move the mouse over *selector* and force CSS :hover on ancestors."""
         result = self._get_coords_full(selector)
         if result is None:
             raise WebToolError(f"hover(): no element for selector {selector!r}")
@@ -757,7 +1050,7 @@ class WebTool:
         )
         return int(result) if result is not None else 0
 
-    # ─── composite high-level flows (gen 6) ──────────────────────────────────
+    # ─── composite high-level flows ──────────────────────────────────────────
 
     def login(
         self,
@@ -769,42 +1062,12 @@ class WebTool:
         submit_selector: str,
         timeout: float = 15.0,
     ) -> bool:
-        """All-in-one login helper.
-
-        Navigates to *url*, fills the username and password fields, clicks the
-        submit element, waits for navigation, and returns True if the URL
-        changed (indicating successful login redirect).
-
-        Parameters
-        ----------
-        url               : login page URL
-        username_selector : CSS selector for the username/email field
-        username          : username string to type
-        password_selector : CSS selector for the password field
-        password          : password string to type
-        submit_selector   : CSS selector for the submit button/input
-        timeout           : max seconds to wait for post-login navigation
-
-        Returns
-        -------
-        True if the URL changed after submit (login redirected), False otherwise.
-
-        Example
-        -------
-        success = web.login(
-            "https://the-internet.herokuapp.com/login",
-            "#username", "tomsmith",
-            "#password", "SuperSecretPassword!",
-            "button[type='submit']",
-        )
-        print(success, web.js("window.location.href"))
-        """
+        """All-in-one login helper."""
         self.go(url)
         self.fill(username_selector, username)
         self.fill(password_selector, password)
         initial_url: str = self.js("window.location.href") or url
         self.click(submit_selector)
-        # Wait for navigation or URL change
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             current: str = self.js("window.location.href") or ""
@@ -812,40 +1075,12 @@ class WebTool:
                 self._apply_selector_shim()
                 return True
             time.sleep(0.1)
-        # Fallback: check readyState after timeout
         self._apply_selector_shim()
         final_url: str = self.js("window.location.href") or ""
         return bool(final_url and final_url != initial_url)
 
     def fill_form(self, field_map: "dict[str, str]") -> None:
-        """Fill multiple form fields in one call.
-
-        Detects the type of each field by selector and uses the appropriate
-        fill strategy:
-          - ``<select>``         → select_option(selector, value)
-          - ``<input type=checkbox>`` or ``<input type=radio>`` →
-            click if value is truthy (non-empty, non-"false", non-"0")
-            and field is not already checked
-          - Everything else      → fill(selector, value)
-
-        Parameters
-        ----------
-        field_map : dict mapping CSS selector → value string
-
-        Raises
-        ------
-        WebToolError if any selector is not found in the DOM.
-
-        Example
-        -------
-        web.fill_form({
-            "#username":  "tomsmith",
-            "#password":  "SuperSecretPassword!",
-            "#remember":  "true",
-            "#country":   "US",
-        })
-        web.click("button[type='submit']")
-        """
+        """Fill multiple form fields in one call."""
         for selector, value in field_map.items():
             esc = _esc_dq(selector)
             field_info_raw = self.js(
@@ -883,32 +1118,7 @@ class WebTool:
         extractor_fn: "Callable[[WebTool], list]",
         max_pages: int = 10,
     ) -> list:
-        """Collect data across multiple pages.
-
-        On each page: calls ``extractor_fn(self)`` to collect items, then
-        checks whether *next_selector* exists and clicks it to advance.
-        Stops when the next-page element disappears or *max_pages* is reached.
-
-        Parameters
-        ----------
-        next_selector : CSS selector for the "next page" link/button
-        extractor_fn  : callable(web) → list — extracts items from current page
-        max_pages     : safety cap (default 10)
-
-        Returns
-        -------
-        Flat list of all items collected across all pages.
-
-        Example
-        -------
-        def get_quotes(web):
-            return web.js(
-                "JSON.stringify(Array.from(document.querySelectorAll('.quote .text'))"
-                ".map(e => e.textContent.trim()))"
-            )
-
-        all_quotes = web.paginate("li.next a", get_quotes, max_pages=5)
-        """
+        """Collect data across multiple pages."""
         results: list = []
         for _page in range(max_pages):
             page_data = extractor_fn(self)
@@ -1152,6 +1362,9 @@ class WebTool:
         self.cmd("Page.enable")
         self.cmd("DOM.enable")
         self.cmd("Runtime.enable")
+        # Re-enable network logging on new tab if it was active
+        if self._network_logging:
+            self.cmd("Network.enable")
         self._apply_selector_shim()
 
     def close_tab(self, tab_id: str):
@@ -1280,6 +1493,11 @@ class AsyncWebTool:
         self._recv_task: Optional[asyncio.Task] = None
         self._css_enabled = False
 
+        # Network logging state
+        self._network_logging: bool = False
+        self._network_log: list[dict] = []
+        self._network_log_lock = asyncio.Lock()
+
     # ──────────── connection ──────────────────────────────────────────────────
 
     async def connect(self, tab_index: int = 0):
@@ -1306,7 +1524,6 @@ class AsyncWebTool:
         await self.cmd_async("Page.enable")
         await self.cmd_async("DOM.enable")
         await self.cmd_async("Runtime.enable")
-        # Install shim
         try:
             await self.cmd_async("Page.addScriptToEvaluateOnNewDocument", {
                 "source": _SELECTOR_SHIM_JS,
@@ -1338,6 +1555,8 @@ class AsyncWebTool:
                     if fut and not fut.done():
                         fut.set_result(msg)
                 elif "method" in msg:
+                    # Dispatch network events
+                    await self._dispatch_event_async(msg)
                     for listener in list(self._event_listeners):
                         try:
                             if asyncio.iscoroutinefunction(listener):
@@ -1351,6 +1570,208 @@ class AsyncWebTool:
                 if not fut.done():
                     fut.cancel()
             self._pending.clear()
+
+    # ──────────── async network event dispatch ────────────────────────────────
+
+    async def _dispatch_event_async(self, event: dict) -> None:
+        if not self._network_logging:
+            return
+        method = event.get("method", "")
+        if method not in _NETWORK_EVENT_METHODS:
+            return
+        await self._handle_network_event_async(event)
+
+    async def _handle_network_event_async(self, event: dict) -> None:
+        method = event.get("method", "")
+        params = event.get("params", {})
+
+        entry: dict = {
+            "type": method,
+            "timestamp": params.get("timestamp", 0),
+            "requestId": params.get("requestId", ""),
+        }
+
+        if method == "Network.requestWillBeSent":
+            req = params.get("request", {})
+            entry["url"] = req.get("url", "")
+            entry["method"] = req.get("method", "GET")
+            entry["resourceType"] = params.get("type", "")
+        elif method == "Network.responseReceived":
+            resp = params.get("response", {})
+            entry["url"] = resp.get("url", "")
+            entry["status"] = resp.get("status", 0)
+            entry["mimeType"] = resp.get("mimeType", "")
+            entry["resourceType"] = params.get("type", "")
+        elif method == "Network.loadingFinished":
+            entry["url"] = ""
+            entry["encodedDataLength"] = params.get("encodedDataLength", 0)
+        elif method == "Network.loadingFailed":
+            entry["url"] = ""
+            entry["errorText"] = params.get("errorText", "")
+            entry["resourceType"] = params.get("type", "")
+
+        async with self._network_log_lock:
+            self._network_log.append(entry)
+
+    # ──────────── async network public API ───────────────────────────────────
+
+    async def enable_network_logging_async(self) -> None:
+        """Enable CDP Network domain and start collecting network events (async)."""
+        await self.cmd_async("Network.enable")
+        async with self._network_log_lock:
+            self._network_log = []
+        self._network_logging = True
+
+    async def get_network_log_async(self) -> list[dict]:
+        """Return a snapshot of all collected network events (async)."""
+        async with self._network_log_lock:
+            return list(self._network_log)
+
+    async def _try_fetch_body_async(self, entry: dict) -> None:
+        request_id = entry.get("requestId", "")
+        if not request_id:
+            return
+        try:
+            result = await self.cmd_async(
+                "Network.getResponseBody", {"requestId": request_id}
+            )
+            body = result.get("result", {}).get("body", "")
+            if body:
+                entry["body_preview"] = body[:500]
+        except Exception:
+            pass
+
+    async def wait_for_request_async(
+        self, pattern: str, timeout: float = 15.0
+    ) -> Optional[dict]:
+        """Async: block until a request URL matching pattern fires."""
+        if not self._network_logging:
+            await self.enable_network_logging_async()
+
+        # Check existing log
+        async with self._network_log_lock:
+            for entry in self._network_log:
+                if (entry.get("type") == "Network.requestWillBeSent"
+                        and pattern in entry.get("url", "")):
+                    return dict(entry)
+
+        # Wait via event listener
+        loop = asyncio.get_running_loop()
+        result_fut: asyncio.Future = loop.create_future()
+
+        async def _on_event(msg: dict):
+            if result_fut.done():
+                return
+            if msg.get("method") == "Network.requestWillBeSent":
+                params = msg.get("params", {})
+                url = params.get("request", {}).get("url", "")
+                if pattern in url:
+                    result_fut.set_result({
+                        "type": "Network.requestWillBeSent",
+                        "url": url,
+                        "method": params.get("request", {}).get("method", "GET"),
+                        "resourceType": params.get("type", ""),
+                        "requestId": params.get("requestId", ""),
+                        "timestamp": params.get("timestamp", 0),
+                    })
+
+        self._event_listeners.append(_on_event)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(result_fut), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            try:
+                self._event_listeners.remove(_on_event)
+            except ValueError:
+                pass
+
+    async def wait_for_response_async(
+        self, pattern: str, timeout: float = 15.0
+    ) -> Optional[dict]:
+        """Async: block until a full response URL matching pattern is available."""
+        if not self._network_logging:
+            await self.enable_network_logging_async()
+
+        # Check existing log for already-complete responses
+        async with self._network_log_lock:
+            finished_ids: set[str] = {
+                e["requestId"]
+                for e in self._network_log
+                if e.get("type") == "Network.loadingFinished"
+            }
+            for entry in self._network_log:
+                if (entry.get("type") == "Network.responseReceived"
+                        and pattern in entry.get("url", "")
+                        and entry.get("requestId") in finished_ids):
+                    result = {
+                        "url": entry.get("url", ""),
+                        "status": entry.get("status", 0),
+                        "mimeType": entry.get("mimeType", ""),
+                        "resourceType": entry.get("resourceType", ""),
+                        "requestId": entry.get("requestId", ""),
+                        "body_preview": "",
+                    }
+                    await self._try_fetch_body_async(result)
+                    return result
+
+        loop = asyncio.get_running_loop()
+        response_fut: asyncio.Future = loop.create_future()
+        matched_entry: dict = {}
+        matched_request_id: list[str] = [""]  # mutable container
+
+        async def _on_event(msg: dict):
+            if response_fut.done():
+                return
+            method = msg.get("method", "")
+            params = msg.get("params", {})
+
+            if method == "Network.responseReceived" and not matched_request_id[0]:
+                resp = params.get("response", {})
+                url = resp.get("url", "")
+                if pattern in url:
+                    matched_entry.update({
+                        "url": url,
+                        "status": resp.get("status", 0),
+                        "mimeType": resp.get("mimeType", ""),
+                        "resourceType": params.get("type", ""),
+                        "requestId": params.get("requestId", ""),
+                        "body_preview": "",
+                    })
+                    matched_request_id[0] = params.get("requestId", "")
+
+            elif method == "Network.loadingFinished":
+                if (matched_request_id[0]
+                        and params.get("requestId") == matched_request_id[0]):
+                    await self._try_fetch_body_async(matched_entry)
+                    if not response_fut.done():
+                        response_fut.set_result(dict(matched_entry))
+
+            elif method == "Network.loadingFailed":
+                if (matched_request_id[0]
+                        and params.get("requestId") == matched_request_id[0]):
+                    matched_entry["errorText"] = params.get("errorText", "")
+                    if not response_fut.done():
+                        response_fut.set_result(dict(matched_entry))
+
+        self._event_listeners.append(_on_event)
+        try:
+            return await asyncio.wait_for(
+                asyncio.shield(response_fut), timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            # Return partial result if we have response headers
+            if matched_entry:
+                await self._try_fetch_body_async(matched_entry)
+                return dict(matched_entry) if matched_entry else None
+            return None
+        finally:
+            try:
+                self._event_listeners.remove(_on_event)
+            except ValueError:
+                pass
 
     # ──────────── low-level ──────────────────────────────────────────────────
 
@@ -1476,7 +1897,6 @@ class AsyncWebTool:
         return result[0], result[1]
 
     async def _force_hover_at_async(self, x: float, y: float):
-        """Force CSS :hover on the node at (x, y) AND its ancestors (gen 6)."""
         try:
             await self._ensure_css_enabled_async()
             node_info = await self.cmd_async("DOM.getNodeForLocation", {
@@ -1754,15 +2174,7 @@ class AsyncWebTool:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class BrowserPool:
-    """Async pool of N independent headless Chrome processes.
-
-    Usage
-    -----
-    async with BrowserPool(size=2) as pool:
-        results = await pool.map(fetch_title_fn, [url1, url2])
-
-    Where ``fetch_title_fn`` has signature ``async def fn(web, arg) -> Any``.
-    """
+    """Async pool of N independent headless Chrome processes."""
 
     def __init__(
         self,
@@ -1860,14 +2272,14 @@ if __name__ == "__main__":
     web = WebTool()
     web.connect()
 
-    # High-level login
-    ok = web.login(
-        "https://the-internet.herokuapp.com/login",
-        "#username", "tomsmith",
-        "#password", "SuperSecretPassword!",
-        "button[type='submit']",
-    )
-    print("Login succeeded:", ok)
-    print("URL:", web.js("window.location.href"))
+    # Demo network logging
+    web.enable_network_logging()
+    web.go("https://quotes.toscrape.com")
+    log = web.get_network_log()
+    print(f"Captured {len(log)} network events")
+    requests_made = [e for e in log if e["type"] == "Network.requestWillBeSent"]
+    print(f"  Requests: {len(requests_made)}")
+    responses = [e for e in log if e["type"] == "Network.responseReceived"]
+    print(f"  Responses: {len(responses)}")
 
     web.close()
