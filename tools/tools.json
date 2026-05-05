@@ -11,13 +11,13 @@
   },
   {
     "name": "click",
-    "description": "Click the first element matching selector. Uses a single Runtime.evaluate call with getBoundingClientRect() — double-quoted JS delimiter so attribute selectors containing single quotes (e.g. a[href='/login']) work correctly. Scrolls element into view before measuring. Raises WebToolError if not found.",
+    "description": "Click the first element matching selector. Uses _get_coords() with a fallback selector chain: (1) exact selector, (2) ':first-child' replaced with ':first-of-type', (3) structural pseudo-classes stripped entirely. Scrolls into view before measuring. Raises WebToolError if no variant matches.",
     "parameters": {
       "selector": { "type": "string" }
     },
     "implementation": "web.click(selector)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('selector'); web.close()\"",
-    "fallback": "Use coordinate_click when selector fails"
+    "fallback": "Use coordinate_click when all selector variants fail"
   },
   {
     "name": "type",
@@ -97,7 +97,7 @@
   },
   {
     "name": "hover",
-    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Uses getBoundingClientRect() for reliable coordinates across all CSS3 pseudo-selectors including :first-child and :nth-child. Calls scrollIntoView() first.",
+    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Uses the same fallback-chain as click(): tries exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes. This lets selectors like '.figure:first-child img' succeed even when the element is not the absolute first child.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -152,12 +152,19 @@
   },
   {
     "name": "get_form_fields",
-    "description": "Introspect form structure. Returns a list of dicts (one per input/select/textarea) with keys: tag, type, name, id, value, placeholder, required.",
+    "description": "Introspect form structure. Returns a list of dicts (one per input/select/textarea) with keys: tag, type, name, id, value, placeholder, required, options (for select elements — list of {value, text}).",
     "parameters": {
       "selector": { "type": "string", "default": "form", "description": "CSS selector for the form element" }
     },
     "implementation": "web.get_form_fields(selector)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); fields = web.get_form_fields('#login-form'); print(json.dumps(fields, indent=2)); web.close()\""
+  },
+  {
+    "name": "get_page_structure",
+    "description": "Return a structural summary of the current page in a single Runtime.evaluate round-trip. Result dict keys: title (string), url (string), h1s (list of strings), h2s (list of strings), link_count (int), form_count (int), table_count (int). Useful for fast page inspection without multiple js() calls.",
+    "parameters": {},
+    "implementation": "web.get_page_structure()",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); print(json.dumps(web.get_page_structure(), indent=2)); web.close()\""
   },
   {
     "name": "open_tab",
@@ -223,7 +230,7 @@
   },
   {
     "name": "browser_pool",
-    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. Importable as 'from tools.web_tool import BrowserPool'.",
+    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. go_async() is race-safe: stale load events from the initial blank-page are detected and discarded, and readyState is verified after the load event fires so that document.title is always populated on return.",
     "parameters": {
       "size": { "type": "number", "default": 2, "description": "Number of Chrome processes in the pool" },
       "headless": { "type": "boolean", "default": true },
@@ -232,11 +239,11 @@
     "implementation": "from tools.web_tool import BrowserPool\n\nasync with BrowserPool(size=2) as pool:\n    results = await pool.map(async_fn, [url1, url2])",
     "bash_usage": "python3 -c \"\nimport asyncio\nfrom tools.web_tool import BrowserPool, AsyncWebTool\n\nasync def fetch(web, url):\n    await web.go_async(url)\n    return await web.js_async('document.title')\n\nasync def main():\n    async with BrowserPool(size=2) as pool:\n        titles = await pool.map(fetch, ['https://example.com', 'https://quotes.toscrape.com'])\n    print(titles)\n\nasyncio.run(main())\n\"",
     "map_signature": "async def fn(web: AsyncWebTool, arg: Any) -> Any",
-    "note": "Requires 'pip install websockets'. For sync usage, use tools.browser_pool.BrowserPool instead."
+    "note": "Requires 'pip install websockets'."
   },
   {
     "name": "async_web_tool",
-    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, fill_async, wait_async, screenshot_async. Used internally by BrowserPool.",
+    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, fill_async, wait_async, screenshot_async. go_async() uses a race-safe sequence with readyState verification. Used internally by BrowserPool.",
     "parameters": {
       "port": { "type": "number", "default": 9222 }
     },

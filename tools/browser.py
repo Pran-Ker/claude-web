@@ -2,7 +2,7 @@
 """
 Minimal Chrome CDP launcher with multi-browser management and pretty logging.
 
-Unchanged from baseline — no modifications required for Generation 1.
+Unchanged from Generation 3 — no modifications required for Generation 4.
 """
 
 import logging
@@ -275,7 +275,6 @@ if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
 
     if cmd == "start":
-        # Env: CDP_PORT=auto|<int>, CDP_COUNT=N, CDP_HEADLESS=1/0, CDP_RANGE=9222-9400
         headless = _env_bool("CDP_HEADLESS", DEFAULT_HEADLESS)
         count = int(_env("CDP_COUNT", "1"))
         range_env = _env("CDP_RANGE")
@@ -299,12 +298,10 @@ if __name__ == "__main__":
             url = b.start()
             urls.append(url)
             log.info(f"STARTED {url}")
-        # Print URLs and exit immediately; Chrome keeps running (no atexit)
         print("\n".join(urls))
         sys.exit(0)
 
     elif cmd == "stop":
-        # Env: CDP_PORTS="9222,9223" (required)
         ports_csv = _env("CDP_PORTS", "")
         ports = [int(p) for p in ports_csv.split(',') if p.strip().isdigit()]
         if not ports:
