@@ -17,7 +17,28 @@
     },
     "implementation": "web.click(selector)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('selector'); web.close()\"",
-    "fallback": "Use coordinate_click when all selector variants fail"
+    "fallback": "Use safe_click(selector, fallback_text) when selector may be unstable, or coordinate_click when all selector variants fail"
+  },
+  {
+    "name": "safe_click",
+    "description": "Click selector with an automatic fallback to click_by_text(fallback_text) when the selector cannot be found. Useful for dynamically-generated class names or unstable DOM paths where the button text is stable. If fallback_text is omitted and the selector fails, raises WebToolError like click(). Does NOT automatically wait for navigation — call click_and_wait() instead when the click triggers a page load.",
+    "parameters": {
+      "selector": { "type": "string", "description": "Primary CSS selector to try" },
+      "fallback_text": { "type": "string", "optional": true, "description": "Visible button/link text to search for if selector fails" }
+    },
+    "implementation": "web.safe_click(selector, fallback_text='Submit')",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.safe_click('button#submit', fallback_text='Submit'); web.close()\""
+  },
+  {
+    "name": "click_and_wait",
+    "description": "Click *selector* and then block until the next Page.loadEventFired or Page.frameStoppedLoading event fires. Re-injects the querySelector shim after load. Use this instead of click() + wait_for_navigation() for logout links, form submit buttons, and any anchor whose href causes a full-page navigation. Returns True if a navigation was observed within timeout, False otherwise (the click still happened).",
+    "parameters": {
+      "selector": { "type": "string" },
+      "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait for the resulting page load" }
+    },
+    "implementation": "web.click_and_wait(selector, timeout=15)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://the-internet.herokuapp.com/login'); web.fill('#username','tomsmith'); web.fill('#password','SuperSecretPassword!'); web.click_and_wait(\\\"button[type='submit']\\\"); print(web.js('window.location.href')); web.close()\"",
+    "when_to_use": "Any click that causes a full-page navigation: form submits, logout links, nav links. Replaces the common click() + wait_for_navigation() pattern."
   },
   {
     "name": "double_click",
@@ -38,6 +59,17 @@
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.triple_click('input#search'); web.close()\""
   },
   {
+    "name": "retry_click",
+    "description": "Attempt click() up to *attempts* times, sleeping *delay* seconds between failures. Useful for elements behind a loading spinner or CSS transition that make them temporarily unclickable. Raises the last WebToolError if all attempts fail.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "attempts": { "type": "number", "default": 3, "description": "Maximum click attempts" },
+      "delay": { "type": "number", "default": 0.5, "description": "Seconds between attempts" }
+    },
+    "implementation": "web.retry_click('button#confirm', attempts=5, delay=0.3)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.retry_click('button#submit', attempts=4, delay=0.5); web.close()\""
+  },
+  {
     "name": "type",
     "description": "Type text into the element matched by selector.",
     "parameters": {
@@ -46,6 +78,16 @@
     },
     "implementation": "web.fill(selector, text)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.fill('selector', 'text'); web.close()\""
+  },
+  {
+    "name": "safe_fill",
+    "description": "Fill *selector* with *text*, falling back to direct JS property assignment if the element cannot be reached by mouse coordinates (off-screen, inside a shadow DOM, or zero-size). Always fires input and change events so React/Vue/Angular listeners register the new value. Uses the native input value setter (via Object.getOwnPropertyDescriptor) to bypass React's controlled-component caching. Raises WebToolError only when the element is completely absent from the DOM.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "text": { "type": "string" }
+    },
+    "implementation": "web.safe_fill(selector, text)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.safe_fill('#search', 'python async'); web.close()\""
   },
   {
     "name": "clear",
@@ -94,6 +136,26 @@
     ]
   },
   {
+    "name": "js_wait",
+    "description": "Retry a JavaScript expression repeatedly until it returns a non-null/non-undefined value, or the timeout expires. Fixes the race condition where wait() sees a selector in the DOM but the element's text content is not yet populated (JS-rendered pages, streaming updates). Polls every *interval* seconds. Returns the first non-None result, or None on timeout.",
+    "parameters": {
+      "code": { "type": "string", "description": "JavaScript expression to evaluate. Should return a truthy value when content is ready." },
+      "timeout": { "type": "number", "default": 5, "description": "Max seconds to retry" },
+      "interval": { "type": "number", "default": 0.2, "description": "Seconds between retries" }
+    },
+    "implementation": "data = web.js_wait(\"JSON.stringify(Array.from(document.querySelectorAll('.quote')).map(q=>q.textContent.trim()))\", timeout=8)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('https://quotes.toscrape.com/js/'); web.wait('.quote'); data = web.js_wait(\\\"JSON.stringify(Array.from(document.querySelectorAll('.quote .text')).map(e=>e.textContent.trim()))\\\", timeout=8); print(json.loads(data)[:2]); web.close()\"",
+    "when_to_use": "After wait() confirms an element exists but js() returns null — the element is present but its content is not yet rendered."
+  },
+  {
+    "name": "health_check",
+    "description": "Ping Chrome with Browser.getVersion to verify the CDP connection is alive. Returns True on success, False on any connection error. Use before a long sequence of commands to detect a stale WebSocket, or inside a retry loop after catching a WebToolError.",
+    "parameters": {},
+    "implementation": "ok = web.health_check()",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); print('alive:', web.health_check()); web.close()\"",
+    "note": "cmd() now auto-reconnects once on transport errors, so health_check() is mainly useful for proactive monitoring or detecting a crashed browser process."
+  },
+  {
     "name": "wait",
     "description": "Poll for a CSS selector at 0.1 s intervals; returns True as soon as the element appears, False on timeout.",
     "parameters": {
@@ -102,6 +164,17 @@
     },
     "implementation": "web.wait(selector, timeout)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); found = web.wait('.my-class', 15); print(found); web.close()\""
+  },
+  {
+    "name": "wait_for_count",
+    "description": "Poll at 0.1 s intervals until at least *count* elements matching selector are present in the DOM. Useful for infinite-scroll or lazy-loaded lists where you need a minimum number of items before processing. Returns True when threshold met, False on timeout.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "count": { "type": "number", "default": 1, "description": "Minimum number of matching elements required" },
+      "timeout": { "type": "number", "default": 10 }
+    },
+    "implementation": "web.wait_for_count('.product-card', count=20, timeout=8)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.scroll('down',1000); ok = web.wait_for_count('.item', count=20, timeout=8); print(ok); web.close()\""
   },
   {
     "name": "wait_for_visible",
@@ -126,7 +199,7 @@
   },
   {
     "name": "wait_for_navigation",
-    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation. Re-injects the querySelector shim after navigation. All CDP events received while waiting are also routed through _dispatch_event so network logging continues seamlessly.",
+    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation. Re-injects the querySelector shim after navigation. For the common click-then-navigate pattern, prefer click_and_wait() which does both in one call.",
     "parameters": {
       "timeout": { "type": "number", "default": 15 }
     },
@@ -153,6 +226,15 @@
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.scroll('down', 800); web.close()\""
   },
   {
+    "name": "scroll_to",
+    "description": "Scroll the element matched by *selector* smoothly into the center of the viewport using scrollIntoView. No-op (no error) if the element is not found. Useful before interacting with elements that are partially off-screen or inside scrollable containers.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.scroll_to(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.scroll_to('#footer'); web.wait_for_visible('#footer'); web.close()\""
+  },
+  {
     "name": "hover",
     "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Two-layer approach: (1) Input.dispatchMouseEvent(mouseMoved); (2) CSS.forcePseudoState applied to the hovered node AND its ancestors (up to 5 levels). Ancestor hovering ensures CSS rules like '.figure:hover .figcaption { display:block }' activate when you hover a child element. Uses the fallback-chain: exact selector, then ':first-child'→':first-of-type', then stripped pseudo-classes.",
     "parameters": {
@@ -163,13 +245,17 @@
   },
   {
     "name": "select_option",
-    "description": "Set a <select> dropdown to the option with the given value attribute, then fire a change event.",
+    "description": "Set a <select> dropdown to a specific option. Matching priority: (1) exact option.value attribute match; (2) exact option.text.trim() match. This two-pass approach handles the common case where a test supplies the visible label ('Option 2') while the underlying <option> carries a numeric value attribute ('2'). After selection, dispatches a bubbling change event. Raises WebToolError if the element is absent or no option matches by either value or text.",
     "parameters": {
       "selector": { "type": "string" },
-      "value": { "type": "string" }
+      "value": { "type": "string", "description": "Option value attribute OR visible option text (tried in that order)" }
     },
     "implementation": "web.select_option(selector, value)",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.select_option('#country', 'US'); web.close()\""
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.select_option('#dropdown', 'Option 2'); web.close()\"",
+    "examples": [
+      "web.select_option('#country', 'US')           # by value attribute",
+      "web.select_option('#size', 'Extra Large')      # by visible label text"
+    ]
   },
   {
     "name": "is_visible",
@@ -278,7 +364,7 @@
   },
   {
     "name": "fill_form",
-    "description": "Fill multiple form fields in one call. Accepts a dict mapping CSS selector to value. Detects field type automatically: <select> uses select_option(), checkbox/radio uses click() (toggled based on truthy/falsy value), all other inputs use fill(). Raises WebToolError if any selector is not found.",
+    "description": "Fill multiple form fields in one call. Accepts a dict mapping CSS selector to value. Detects field type automatically: <select> uses select_option() (value OR text match), checkbox/radio uses click() (toggled based on truthy/falsy value), all other inputs use fill(). Raises WebToolError if any selector is not found.",
     "parameters": {
       "field_map": {
         "type": "object",
@@ -357,33 +443,23 @@
   },
   {
     "name": "wait_for_request",
-    "description": "Block until a network request whose URL contains the given pattern fires. Checks the already-collected log first (returns immediately if already seen), then polls the WebSocket for new events. enable_network_logging() is called automatically if not yet enabled. Returns a dict with keys: type, url, method, resourceType, requestId, timestamp — or None on timeout. Ideal for confirming that a SPA triggered an API call after a user action.",
+    "description": "Block until a network request whose URL contains the given pattern fires. Checks the already-collected log first (returns immediately if already seen), then polls the WebSocket for new events. enable_network_logging() is called automatically if not yet enabled. Returns a dict with keys: type, url, method, resourceType, requestId, timestamp — or None on timeout.",
     "parameters": {
-      "pattern": { "type": "string", "description": "Substring to match against the full request URL (e.g. '/api/search', '.json')" },
-      "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait" }
+      "pattern": { "type": "string", "description": "Substring to match against the full request URL" },
+      "timeout": { "type": "number", "default": 15 }
     },
     "implementation": "req = web.wait_for_request('/api/data', timeout=10)",
-    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://spa.example.com')\nweb.click('#load-data')\nreq = web.wait_for_request('/api/items', timeout=10)\nif req:\n    print('API called:', req['url'])\nweb.close()\n\"",
-    "note": "Call enable_network_logging() before navigation to avoid missing early requests."
+    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://spa.example.com')\nweb.click('#load-data')\nreq = web.wait_for_request('/api/items', timeout=10)\nif req:\n    print('API called:', req['url'])\nweb.close()\n\""
   },
   {
     "name": "wait_for_response",
-    "description": "Block until a complete network response (headers + body loaded) whose URL contains the given pattern is available. Waits for Network.responseReceived then Network.loadingFinished for the same requestId, then fetches up to 500 chars of the response body via Network.getResponseBody. Returns {url, status, mimeType, resourceType, requestId, body_preview} or None on timeout. enable_network_logging() is called automatically if not yet enabled.",
+    "description": "Block until a complete network response (headers + body loaded) whose URL contains the given pattern is available. Returns {url, status, mimeType, resourceType, requestId, body_preview} or None on timeout.",
     "parameters": {
-      "pattern": { "type": "string", "description": "Substring to match against the full response URL (e.g. '/api/search', '.json')" },
-      "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait for the complete response" }
+      "pattern": { "type": "string" },
+      "timeout": { "type": "number", "default": 15 }
     },
     "implementation": "resp = web.wait_for_response('/api/items', timeout=10)",
-    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://spa.example.com')\nweb.click('#load-data')\nresp = web.wait_for_response('/api/items', timeout=10)\nif resp:\n    print(resp['status'], resp['body_preview'][:200])\nweb.close()\n\"",
-    "return_fields": {
-      "url": "Full response URL",
-      "status": "HTTP status code (int)",
-      "mimeType": "Content-Type mime type string",
-      "resourceType": "CDP resource type (XHR, Fetch, Document, etc.)",
-      "requestId": "CDP request ID for further lookups",
-      "body_preview": "First 500 characters of the decoded response body (empty string if unavailable)"
-    },
-    "note": "body_preview is populated only for text responses where Network.getResponseBody succeeds. Binary/encoded responses may have an empty body_preview."
+    "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://spa.example.com')\nweb.click('#load-data')\nresp = web.wait_for_response('/api/items', timeout=10)\nif resp:\n    print(resp['status'], resp['body_preview'][:200])\nweb.close()\n\""
   },
   {
     "name": "coordinate_click",
@@ -415,9 +491,9 @@
   },
   {
     "name": "browser_pool",
-    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. AsyncWebTool gains enable_network_logging_async, get_network_log_async, wait_for_request_async, wait_for_response_async for SPA network inspection in async tasks.",
+    "description": "Create and manage an async pool of N independent headless Chrome processes. Supports 'async with' context manager and pool.map() for parallel task dispatch. Each slot owns a dedicated AsyncWebTool. go_async() now waits for a non-empty document.title after readyState complete (guards against Heroku cold-start empty responses).",
     "parameters": {
-      "size": { "type": "number", "default": 2, "description": "Number of Chrome processes in the pool" },
+      "size": { "type": "number", "default": 2 },
       "headless": { "type": "boolean", "default": true },
       "port_start": { "type": "number", "default": 9300 }
     },
@@ -428,11 +504,11 @@
   },
   {
     "name": "async_web_tool",
-    "description": "Fully async CDP browser automation via AsyncWebTool. Gen 7 adds: enable_network_logging_async(), get_network_log_async(), wait_for_request_async(pattern, timeout), wait_for_response_async(pattern, timeout). Network events are dispatched in _recv_loop so they are captured even when no command is in flight. hover_async() forces :hover on hovered node AND ancestors. querySelector shim injected on connect and after each navigation.",
+    "description": "Fully async CDP browser automation via AsyncWebTool. go_async() (gen-8) polls for non-empty document.title after readyState complete — prevents empty-title results on Heroku cold-start pages. All gen-7 features preserved: enable_network_logging_async, get_network_log_async, wait_for_request_async, wait_for_response_async, hover_async with ancestor :hover forcing.",
     "parameters": {
       "port": { "type": "number", "default": 9222 }
     },
-    "implementation": "from tools.web_tool import AsyncWebTool\naweb = AsyncWebTool(port=9222)\nawait aweb.connect()\nawait aweb.enable_network_logging_async()\nawait aweb.go_async('https://spa.example.com')\nawait aweb.click_async('#load')\nresp = await aweb.wait_for_response_async('/api/data', timeout=10)\nprint(resp)\nawait aweb.close()",
+    "implementation": "from tools.web_tool import AsyncWebTool\naweb = AsyncWebTool(port=9222)\nawait aweb.connect()\nawait aweb.go_async('https://example.com')\nprint(await aweb.js_async('document.title'))\nawait aweb.close()",
     "bash_usage": "python3 -c \"import asyncio; from tools.web_tool import AsyncWebTool\nasync def main():\n    web = AsyncWebTool(9222)\n    await web.connect()\n    await web.go_async('https://example.com')\n    print(await web.js_async('document.title'))\n    await web.close()\nasyncio.run(main())\"",
     "requires": "pip install websockets"
   },

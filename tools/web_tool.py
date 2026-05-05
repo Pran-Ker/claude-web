@@ -1,57 +1,62 @@
 """
-web_tool.py — Generation 7 WebTool built on Chrome DevTools Protocol (CDP).
+web_tool.py — Generation 8 WebTool built on Chrome DevTools Protocol (CDP).
 
-Changes over Generation 6
+Changes over Generation 7
 --------------------------
-Network-level SPA support — three new features built on the CDP Network domain:
+Error-resilience and trajectory bug-fixes:
 
-  enable_network_logging() → None
-    Calls Network.enable, resets the in-process network log, and sets an
-    internal flag so that every CDP event dispatched through cmd() or the
-    waiting loops is automatically routed to the network log.  The log
-    captures Network.requestWillBeSent, Network.responseReceived,
-    Network.loadingFinished, and Network.loadingFailed events with their
-    key metadata fields.
+  Trajectory fix — T2c (select_option by text):
+    select_option() now tries to match options by value attribute first, and
+    falls back to matching by visible option text when no value matches.
+    Previously, passing the display text "Option 2" to a <select> whose
+    options have value="2" silently left the dropdown on its default.
 
-  get_network_log() → list[dict]
-    Returns a copy of all collected network-event entries since the last
-    enable_network_logging() call.  Each entry is a dict with at minimum:
-      type, timestamp, requestId, url.
-    Requests additionally carry: method, resourceType.
-    Responses additionally carry: status, mimeType, resourceType, body_preview
-      (populated by a best-effort Network.getResponseBody call).
+  Trajectory fix — T4a / T1c (click navigation not awaited):
+    New click_and_wait(selector, timeout) clicks an element and then blocks
+    until the next page-load event, re-injecting the querySelector shim.
+    This replaces the manual click() + wait_for_navigation() pattern and
+    prevents the URL-unchanged failures seen when logout/form-submit clicks
+    were not followed by an explicit navigation wait.
 
-  wait_for_request(pattern, timeout=15) → Optional[dict]
-    Blocks until a Network.requestWillBeSent event fires whose URL contains
-    the given pattern string.  Checks the already-collected log first, then
-    polls the WebSocket.  Returns the matching log entry or None on timeout.
-    enable_network_logging() must be called before navigation; otherwise
-    wait_for_request() will call it automatically.
+  Trajectory fix — T4b (go_async empty title in BrowserPool):
+    go_async() now polls for a non-empty document.title for up to 3 s after
+    readyState reaches "complete", guarding against fast Heroku cold-start
+    responses that send an empty page before JS sets the title.
 
-  wait_for_response(pattern, timeout=15) → Optional[dict]
-    Blocks until a full response (responseReceived + loadingFinished) whose
-    URL contains pattern is available.  After the response headers arrive,
-    waits up to the remaining timeout for loadingFinished, then calls
-    Network.getResponseBody to populate body_preview (first 500 chars).
-    Returns {url, status, mimeType, resourceType, body_preview, requestId}
-    or None on timeout.  enable_network_logging() is called automatically
-    if not already enabled.
+  Trajectory fix — T4c / T5c (js() returning None on JS-rendered pages):
+    New js_wait(code, timeout, interval) retries a JS expression until it
+    returns a non-None value or the timeout expires.  Useful when the DOM
+    contains the required selector but a child text node is not yet populated.
 
-AsyncWebTool additions (mirroring the sync API):
-  enable_network_logging_async()
-  get_network_log_async() → list[dict]
-  wait_for_request_async(pattern, timeout=15) → Optional[dict]
-  wait_for_response_async(pattern, timeout=15) → Optional[dict]
+  Gen-8 focus — safe_click(selector, fallback_text=None) → bool:
+    Attempts to click by selector; if WebToolError is raised and
+    fallback_text is given, retries via click_by_text(fallback_text).
 
-Internal changes:
-  _dispatch_event(event) — new method called in cmd(), go(), and all
-    _wait_for_* loops so that network events are recorded in real time
-    regardless of which synchronous path is executing.
-  _NETWORK_EVENT_METHODS frozenset — centralised set of Network.* event
-    names that are interesting for the log.
-  _try_fetch_body(entry, request_id) — helper that calls
-    Network.getResponseBody; stores result in entry["body_preview"].
-  All generation-6 behaviour is preserved unchanged.
+  Gen-8 focus — safe_fill(selector, text) → bool:
+    Attempts click-triple-select + type; if the element cannot be reached
+    by coordinates, falls back to direct JS property assignment with
+    input/change event dispatch.  Never raises on "element not visible"
+    layout issues — only raises on "element not found".
+
+  Gen-8 focus — auto-reconnect in cmd():
+    cmd() is split into _cmd_impl() (raw send/recv, no reconnect) and
+    cmd() (wraps _cmd_impl with one automatic reconnect attempt on any
+    WebSocket transport error).  _reconnect() closes the stale socket,
+    opens a fresh WebSocket to the same tab URL, and re-enables
+    Page / DOM / Runtime (+ Network if logging was active).
+
+  Gen-8 focus — health_check() → bool:
+    Sends Browser.getVersion; returns True if a non-error response is
+    received, False on any exception.  Can be called at any time to
+    probe the connection before a long sequence of commands.
+
+  New helpers:
+    scroll_to(selector) — scrollIntoView with smooth behaviour.
+    wait_for_count(selector, count, timeout) — wait until at least N
+      elements matching selector are in the DOM.
+    retry_click(selector, attempts, delay) — retries click() up to N times.
+
+  All generation-7 behaviour is preserved unchanged.
 """
 
 from __future__ import annotations
@@ -178,6 +183,19 @@ def _coords_js(escaped_selector: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Reconnect-safe transport errors
+# ──────────────────────────────────────────────────────────────────────────────
+
+_TRANSPORT_ERRORS = (
+    websocket.WebSocketConnectionClosedException,
+    websocket.WebSocketException,
+    ConnectionResetError,
+    BrokenPipeError,
+    OSError,
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Synchronous core tool
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -232,9 +250,12 @@ class WebTool:
             self.ws.close()
             self.ws = None
 
-    # ──────────────────────────── low-level cmd ──────────────────────────────
+    # ──────────────────────────── low-level cmd (with auto-reconnect) ────────
 
-    def cmd(self, method: str, params: Optional[dict] = None) -> dict:
+    def _cmd_impl(self, method: str, params: Optional[dict] = None) -> dict:
+        """Raw CDP command — send and wait for matching response id.
+        Does NOT reconnect on failure; called by cmd() which handles that.
+        """
         self.msg_id += 1
         msg = {"id": self.msg_id, "method": method, "params": params or {}}
         self.ws.send(json.dumps(msg))
@@ -244,13 +265,84 @@ class WebTool:
             raw = self.ws.recv()
             response = json.loads(raw)
             if "method" in response:
-                # Dispatch to network logger before buffering
                 self._dispatch_event(response)
                 with self._event_lock:
                     self._pending_events.append(response)
                 continue
             if response.get("id") == target_id:
                 return response
+
+    def _reconnect(self):
+        """Close the stale WebSocket and open a fresh one to the current tab."""
+        if self._current_tab_id is None:
+            raise WebToolError("Cannot reconnect: no current tab ID stored")
+
+        ws_url = self._tabs.get(self._current_tab_id)
+        if not ws_url:
+            self._refresh_tab_registry()
+            ws_url = self._tabs.get(self._current_tab_id)
+        if not ws_url:
+            raise WebToolError(
+                f"Cannot reconnect: tab {self._current_tab_id!r} not in registry"
+            )
+
+        try:
+            if self.ws:
+                self.ws.close()
+        except Exception:
+            pass
+
+        self.ws = websocket.create_connection(ws_url)
+        self.msg_id = 0
+        self._css_enabled = False
+
+        # Re-enable required CDP domains
+        for domain_method in ("Page.enable", "DOM.enable", "Runtime.enable"):
+            try:
+                self._cmd_impl(domain_method, {})
+            except Exception:
+                pass
+        if self._network_logging:
+            try:
+                self._cmd_impl("Network.enable", {})
+            except Exception:
+                pass
+        try:
+            self._apply_selector_shim()
+        except Exception:
+            pass
+
+    def cmd(self, method: str, params: Optional[dict] = None) -> dict:
+        """Send a CDP command, reconnecting once on transport error."""
+        if self.ws is None:
+            self._reconnect()
+        try:
+            return self._cmd_impl(method, params)
+        except _TRANSPORT_ERRORS as exc:
+            try:
+                self._reconnect()
+                return self._cmd_impl(method, params)
+            except Exception as reconnect_err:
+                raise WebToolError(
+                    f"WebSocket connection lost and reconnect failed: {reconnect_err}"
+                ) from exc
+
+    def health_check(self) -> bool:
+        """Return True if the CDP connection is alive and Chrome responds.
+
+        Sends a lightweight Browser.getVersion command and returns True when a
+        valid response is received.  Returns False on any exception.
+
+        Example
+        -------
+        if not web.health_check():
+            web.connect()   # re-establish from scratch
+        """
+        try:
+            result = self.cmd("Browser.getVersion")
+            return "result" in result
+        except Exception:
+            return False
 
     def _drain_events(self) -> list[dict]:
         with self._event_lock:
@@ -335,52 +427,14 @@ class WebTool:
     # ──────────────────────────── network public API ──────────────────────────
 
     def enable_network_logging(self) -> None:
-        """Enable CDP Network domain and start collecting network events.
-
-        Resets the network log and enables the Network domain via CDP.  After
-        this call every network request/response that flows through
-        cmd() / go() / wait_* loops is captured in the internal log and
-        retrievable via get_network_log().
-
-        Call this *before* navigating so that the events emitted during
-        page load are captured.
-
-        Example
-        -------
-        web.enable_network_logging()
-        web.go("https://api.example.com/page")
-        log = web.get_network_log()
-        api_calls = [e for e in log if '/api/' in e.get('url','')]
-        """
+        """Enable CDP Network domain and start collecting network events."""
         self.cmd("Network.enable")
         with self._network_lock:
             self._network_log = []
         self._network_logging = True
 
     def get_network_log(self) -> list[dict]:
-        """Return all collected network-event entries since enable_network_logging().
-
-        Each entry is a dict with at minimum: type, timestamp, requestId, url.
-
-        Entry shapes by type
-        --------------------
-        Network.requestWillBeSent : url, method, resourceType
-        Network.responseReceived  : url, status, mimeType, resourceType
-        Network.loadingFinished   : encodedDataLength
-        Network.loadingFailed     : errorText, resourceType
-
-        Returns
-        -------
-        list[dict]  — snapshot of the log at call time (a copy).
-
-        Example
-        -------
-        log = web.get_network_log()
-        xhr = [e for e in log if e['type'] == 'Network.responseReceived'
-                               and 'xhr' in e.get('resourceType','').lower()]
-        """
-        # Drain any buffered events that arrived while no cmd() was running
-        # (shouldn't happen in normal single-threaded usage, but be safe)
+        """Return all collected network-event entries since enable_network_logging()."""
         for event in self._drain_events():
             self._dispatch_event(event)
         with self._network_lock:
@@ -397,51 +451,21 @@ class WebTool:
             if body:
                 entry["body_preview"] = body[:500]
         except Exception:
-            pass  # non-fatal — body may not be available yet
+            pass
 
     def wait_for_request(
         self, pattern: str, timeout: float = 15.0
     ) -> Optional[dict]:
-        """Block until a network request whose URL contains *pattern* fires.
-
-        Checks the already-collected network log first (so if the request
-        already fired before this call it is returned immediately), then
-        polls the WebSocket for new events.
-
-        ``enable_network_logging()`` is called automatically if it has not
-        been called yet.
-
-        Parameters
-        ----------
-        pattern : str
-            Substring to match against the full request URL.
-        timeout : float
-            Maximum seconds to wait.
-
-        Returns
-        -------
-        dict with keys: type, url, method, resourceType, requestId, timestamp
-        or None if the timeout expires.
-
-        Example
-        -------
-        web.enable_network_logging()
-        web.go("https://spa.example.com")
-        req = web.wait_for_request("/api/data", timeout=10)
-        if req:
-            print("API called:", req['url'])
-        """
+        """Block until a network request whose URL contains *pattern* fires."""
         if not self._network_logging:
             self.enable_network_logging()
 
-        # Check existing log first
         with self._network_lock:
             for entry in self._network_log:
                 if (entry.get("type") == "Network.requestWillBeSent"
                         and pattern in entry.get("url", "")):
                     return dict(entry)
 
-        # Poll WebSocket for new events
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -485,41 +509,10 @@ class WebTool:
     def wait_for_response(
         self, pattern: str, timeout: float = 15.0
     ) -> Optional[dict]:
-        """Block until a network response whose URL contains *pattern* is complete.
-
-        Waits for ``Network.responseReceived`` matching *pattern*, then waits
-        for the corresponding ``Network.loadingFinished`` event (so the body
-        is available), and finally fetches up to 500 characters of the
-        response body via ``Network.getResponseBody``.
-
-        ``enable_network_logging()`` is called automatically if it has not
-        been called yet.
-
-        Parameters
-        ----------
-        pattern : str
-            Substring to match against the full response URL.
-        timeout : float
-            Maximum seconds to wait for the complete response.
-
-        Returns
-        -------
-        dict with keys: url, status, mimeType, resourceType, requestId,
-                        body_preview (str, may be empty)
-        or None if the timeout expires before the matching response arrives.
-
-        Example
-        -------
-        web.enable_network_logging()
-        web.click("button#load-more")
-        resp = web.wait_for_response("/api/items", timeout=10)
-        if resp:
-            print(resp['status'], resp['body_preview'][:200])
-        """
+        """Block until a complete response whose URL contains *pattern* is available."""
         if not self._network_logging:
             self.enable_network_logging()
 
-        # Check existing log — look for a responseReceived already captured
         matched_entry: Optional[dict] = None
         matched_request_id: Optional[str] = None
         loading_finished: bool = False
@@ -550,7 +543,6 @@ class WebTool:
             self._try_fetch_body(matched_entry)
             return matched_entry
 
-        # Poll WebSocket for new events
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -561,8 +553,6 @@ class WebTool:
                 raw = self.ws.recv()
                 self.ws.settimeout(None)
             except websocket.WebSocketTimeoutException:
-                # If we already have the response headers, try body even without
-                # loadingFinished (best-effort on timeout)
                 if matched_entry:
                     self._try_fetch_body(matched_entry)
                     if matched_entry.get("body_preview"):
@@ -610,8 +600,6 @@ class WebTool:
                     return matched_entry
 
         self.ws.settimeout(None)
-
-        # Return partial result if we at least got response headers
         if matched_entry:
             self._try_fetch_body(matched_entry)
             return matched_entry
@@ -711,6 +699,33 @@ class WebTool:
         if result:
             self._apply_selector_shim()
         return result is not None
+
+    def click_and_wait(self, selector: str, timeout: float = 15.0) -> bool:
+        """Click *selector* then block until the next page-load event fires.
+
+        Combines click() + wait_for_navigation() in a single call.  Use this
+        when clicking a link or submit button that causes a full-page
+        navigation, to avoid reading stale DOM immediately after the click.
+
+        Parameters
+        ----------
+        selector : str
+            CSS selector for the element to click.
+        timeout : float
+            Maximum seconds to wait for the resulting page load.
+
+        Returns
+        -------
+        True if a page-load event was observed, False on timeout (but the
+        click was still dispatched).
+
+        Example
+        -------
+        web.click_and_wait('a[href="/logout"]')
+        print(web.js('window.location.href'))  # reliably shows new URL
+        """
+        self.click(selector)
+        return self.wait_for_navigation(timeout=timeout)
 
     # ──────────────────────────── element helpers ─────────────────────────────
 
@@ -816,6 +831,46 @@ class WebTool:
         })
         return True
 
+    def safe_click(
+        self,
+        selector: str,
+        fallback_text: Optional[str] = None,
+    ) -> bool:
+        """Click *selector*, falling back to click_by_text(*fallback_text*) on failure.
+
+        Tries to click the element matched by *selector*.  If no element is
+        found (WebToolError) and *fallback_text* is provided, retries using
+        :meth:`click_by_text` which searches visible text content instead of
+        a CSS path.
+
+        This is useful when a site's DOM structure changes between page loads
+        (dynamic class names, shadow roots, etc.) but the button text is
+        stable.
+
+        Parameters
+        ----------
+        selector : str
+            Primary CSS selector to try.
+        fallback_text : str, optional
+            Visible text to search for if *selector* fails.  Passed verbatim
+            to click_by_text(fallback_text, tag='*').
+
+        Returns
+        -------
+        True on success.  Raises WebToolError if both strategies fail.
+
+        Example
+        -------
+        web.safe_click('button#submit', fallback_text='Submit')
+        web.safe_click('a[href="/logout"]', fallback_text='Logout')
+        """
+        try:
+            return self.click(selector)
+        except WebToolError:
+            if fallback_text is not None:
+                return self.click_by_text(fallback_text)
+            raise
+
     def double_click(self, selector: str) -> bool:
         coords = self._get_coords(selector)
         if coords is None:
@@ -851,6 +906,43 @@ class WebTool:
                 "button": "left", "clickCount": click_count,
             })
         return True
+
+    def retry_click(
+        self,
+        selector: str,
+        attempts: int = 3,
+        delay: float = 0.5,
+    ) -> bool:
+        """Attempt click() up to *attempts* times, waiting *delay* seconds between tries.
+
+        Useful for elements that are in the DOM but not yet interactable
+        (e.g. behind a loading spinner that disappears after animation).
+
+        Parameters
+        ----------
+        selector : str
+            CSS selector for the target element.
+        attempts : int
+            Maximum number of click attempts (default 3).
+        delay : float
+            Seconds to wait between failed attempts (default 0.5).
+
+        Returns
+        -------
+        True on success.  Raises the last WebToolError if all attempts fail.
+
+        Example
+        -------
+        web.retry_click('button#confirm', attempts=5, delay=0.3)
+        """
+        last_error: Optional[WebToolError] = None
+        for _ in range(max(1, attempts)):
+            try:
+                return self.click(selector)
+            except WebToolError as exc:
+                last_error = exc
+                time.sleep(delay)
+        raise last_error  # type: ignore[misc]
 
     def type(self, text: str):
         for char in text:
@@ -889,6 +981,69 @@ class WebTool:
                     f"fill(): no element for selector {selector!r}"
                 )
 
+    def safe_fill(self, selector: str, text: str) -> bool:
+        """Fill *selector* with *text*, falling back to JS injection on layout failure.
+
+        Strategy:
+        1. Attempt the standard fill() (triple-click to select-all + type).
+        2. If fill() raises WebToolError (element not found) — re-raise.
+        3. If fill() succeeds but the element couldn't be reached by
+           coordinates (off-screen, zero-size), the fallback JS path inside
+           fill() handles it automatically.
+
+        The method always fires ``input`` and ``change`` events so framework
+        listeners (React, Vue, Angular) register the new value.
+
+        Parameters
+        ----------
+        selector : str
+            CSS selector for the input/textarea element.
+        text : str
+            Value to set.
+
+        Returns
+        -------
+        True on success.  Raises WebToolError only when the element is absent.
+
+        Example
+        -------
+        web.safe_fill('#search', 'python asyncio')
+        web.safe_fill('textarea.notes', 'Hello\\nWorld')
+        """
+        esc_sel  = _esc_dq(selector)
+        esc_text = _esc_dq(text)
+
+        # Try normal fill first (handles both coordinate and JS-fallback paths)
+        try:
+            self.fill(selector, text)
+            return True
+        except WebToolError:
+            pass  # element not reachable via coords, try pure JS injection
+
+        # Pure JS injection fallback
+        result = self.js(
+            f'(function(){{'
+            f'  var el = document.querySelector("{esc_sel}");'
+            f'  if (!el) return "NOT_FOUND";'
+            f'  el.focus();'
+            f'  var nativeInput = Object.getOwnPropertyDescriptor('
+            f'    Object.getPrototypeOf(el), "value");'
+            f'  if (nativeInput && nativeInput.set) {{'
+            f'    nativeInput.set.call(el, "{esc_text}");'
+            f'  }} else {{'
+            f'    el.value = "{esc_text}";'
+            f'  }}'
+            f'  el.dispatchEvent(new Event("input",  {{bubbles:true}}));'
+            f'  el.dispatchEvent(new Event("change", {{bubbles:true}}));'
+            f'  return "ok";'
+            f'}})()'
+        )
+        if result == "NOT_FOUND":
+            raise WebToolError(
+                f"safe_fill(): no element for selector {selector!r}"
+            )
+        return True
+
     def clear(self, selector: str):
         esc_sel = _esc_dq(selector)
         result = self.js(
@@ -913,6 +1068,45 @@ class WebTool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self._query(selector):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def wait_for_count(
+        self,
+        selector: str,
+        count: int = 1,
+        timeout: float = 10.0,
+    ) -> bool:
+        """Poll until at least *count* elements matching *selector* are in the DOM.
+
+        Useful when a page renders items incrementally (infinite scroll, lazy
+        load, streaming) and you need a minimum number before processing.
+
+        Parameters
+        ----------
+        selector : str
+            CSS selector to count.
+        count : int
+            Minimum number of matching elements to wait for (default 1).
+        timeout : float
+            Maximum seconds to wait (default 10).
+
+        Returns
+        -------
+        True when the threshold is met, False on timeout.
+
+        Example
+        -------
+        web.scroll('down', 1000)
+        ok = web.wait_for_count('.product-card', count=20, timeout=8)
+        """
+        esc = _esc_dq(selector)
+        code = f'document.querySelectorAll("{esc}").length'
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            n = self.js(code)
+            if n is not None and int(n) >= count:
                 return True
             time.sleep(0.1)
         return False
@@ -986,6 +1180,26 @@ class WebTool:
             "deltaY": delta_y,
         })
 
+    def scroll_to(self, selector: str):
+        """Scroll *selector* into the visible viewport (smooth behaviour).
+
+        Uses ``element.scrollIntoView({behavior:'smooth', block:'center'})``
+        which works even when the page has custom scroll containers.  Does
+        nothing (no error) if the element is not found.
+
+        Example
+        -------
+        web.scroll_to('#footer-newsletter')
+        web.wait_for_visible('#footer-newsletter')
+        """
+        esc = _esc_dq(selector)
+        self.js(
+            f'(function(){{'
+            f'  var el = document.querySelector("{esc}");'
+            f'  if (el) el.scrollIntoView({{behavior:"smooth",block:"center"}});'
+            f'}})()'
+        )
+
     def hover(self, selector: str):
         """Move the mouse over *selector* and force CSS :hover on ancestors."""
         result = self._get_coords_full(selector)
@@ -1000,21 +1214,61 @@ class WebTool:
         self._force_hover_at(x, y, matched_sel)
 
     def select_option(self, selector: str, value: str):
+        """Set a <select> dropdown by option *value* attribute OR visible text.
+
+        Matching priority
+        -----------------
+        1. Exact match on ``option.value``.
+        2. Exact match on ``option.text.trim()`` (visible label).
+
+        This two-pass approach handles the common discrepancy where a test
+        passes the human-readable label ("Option 2") while the underlying
+        ``<option>`` element carries a numeric value attribute ("2").
+
+        After setting the selected option, a ``change`` event is dispatched
+        with ``bubbles:true`` so framework listeners fire.
+
+        Raises WebToolError if the element is not found, or if no option
+        matches by either value or text.
+
+        Example
+        -------
+        web.select_option('#country', 'US')          # by value
+        web.select_option('#size',    'Extra Large')  # by text
+        """
         esc_sel = _esc_sq(selector)
         esc_val = _esc_sq(value)
         code = (
             f"(function(){{"
             f"  var el = document.querySelector('{esc_sel}');"
             f"  if (!el) return 'NOT_FOUND';"
-            f"  el.value = '{esc_val}';"
+            f"  var found = false;"
+            f"  for (var i = 0; i < el.options.length; i++) {{"
+            f"    if (el.options[i].value === '{esc_val}') {{"
+            f"      el.selectedIndex = i; found = true; break;"
+            f"    }}"
+            f"  }}"
+            f"  if (!found) {{"
+            f"    for (var j = 0; j < el.options.length; j++) {{"
+            f"      if (el.options[j].text.trim() === '{esc_val}') {{"
+            f"        el.selectedIndex = j; found = true; break;"
+            f"      }}"
+            f"    }}"
+            f"  }}"
+            f"  if (!found) return 'VALUE_NOT_FOUND';"
             f"  el.dispatchEvent(new Event('change', {{bubbles: true}}));"
-            f"  return el.value;"
+            f"  return el.options[el.selectedIndex].text.trim();"
             f"}})()"
         )
         result = self.js(code)
         if result == "NOT_FOUND":
             raise WebToolError(
                 f"select_option(): no element for selector {selector!r}"
+            )
+        if result == "VALUE_NOT_FOUND":
+            raise WebToolError(
+                f"select_option(): no option with value or text {value!r} "
+                f"in {selector!r}"
             )
 
     # ─── visibility / introspection ───────────────────────────────────────────
@@ -1362,7 +1616,6 @@ class WebTool:
         self.cmd("Page.enable")
         self.cmd("DOM.enable")
         self.cmd("Runtime.enable")
-        # Re-enable network logging on new tab if it was active
         if self._network_logging:
             self.cmd("Network.enable")
         self._apply_selector_shim()
@@ -1394,7 +1647,7 @@ class WebTool:
             if t.get("type") == "page"
         ]
 
-    # ──────────────────────────── JS helper ──────────────────────────────────
+    # ──────────────────────────── JS helpers ─────────────────────────────────
 
     def js(self, code: str):
         try:
@@ -1439,6 +1692,50 @@ class WebTool:
             )
             return None
 
+    def js_wait(
+        self,
+        code: str,
+        timeout: float = 5.0,
+        interval: float = 0.2,
+    ):
+        """Retry *code* via js() until it returns a non-None value or *timeout* expires.
+
+        Handles the common race condition where the selector exists in the DOM
+        but the element's text / inner content is not yet populated, causing a
+        plain js() call to return null.  Also useful after scroll-triggered
+        lazy loading when the exact moment of rendering is unknown.
+
+        Parameters
+        ----------
+        code : str
+            JavaScript expression to evaluate.  Should evaluate to a truthy
+            value when the expected content is ready.
+        timeout : float
+            Maximum seconds to keep retrying (default 5).
+        interval : float
+            Sleep between retries in seconds (default 0.2).
+
+        Returns
+        -------
+        The first non-None result, or None if the timeout expires.
+
+        Example
+        -------
+        data = web.js_wait(
+            "JSON.stringify(Array.from(document.querySelectorAll('.quote'))"
+            ".map(q => q.querySelector('.text').textContent.trim()))",
+            timeout=8,
+        )
+        quotes = json.loads(data)
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            result = self.js(code)
+            if result is not None:
+                return result
+            time.sleep(interval)
+        return None
+
     # ──────────────────────────── screenshot ─────────────────────────────────
 
     def screenshot(
@@ -1465,6 +1762,9 @@ class WebTool:
         return self.js(
             f"document.querySelector('{escaped}')?.textContent ?? null"
         )
+
+    # Alias
+    get_text = text
 
     def attr(self, selector: str, attribute: str) -> Optional[str]:
         esc_sel  = _esc_sq(selector)
@@ -1555,7 +1855,6 @@ class AsyncWebTool:
                     if fut and not fut.done():
                         fut.set_result(msg)
                 elif "method" in msg:
-                    # Dispatch network events
                     await self._dispatch_event_async(msg)
                     for listener in list(self._event_listeners):
                         try:
@@ -1648,14 +1947,12 @@ class AsyncWebTool:
         if not self._network_logging:
             await self.enable_network_logging_async()
 
-        # Check existing log
         async with self._network_log_lock:
             for entry in self._network_log:
                 if (entry.get("type") == "Network.requestWillBeSent"
                         and pattern in entry.get("url", "")):
                     return dict(entry)
 
-        # Wait via event listener
         loop = asyncio.get_running_loop()
         result_fut: asyncio.Future = loop.create_future()
 
@@ -1695,7 +1992,6 @@ class AsyncWebTool:
         if not self._network_logging:
             await self.enable_network_logging_async()
 
-        # Check existing log for already-complete responses
         async with self._network_log_lock:
             finished_ids: set[str] = {
                 e["requestId"]
@@ -1720,7 +2016,7 @@ class AsyncWebTool:
         loop = asyncio.get_running_loop()
         response_fut: asyncio.Future = loop.create_future()
         matched_entry: dict = {}
-        matched_request_id: list[str] = [""]  # mutable container
+        matched_request_id: list[str] = [""]
 
         async def _on_event(msg: dict):
             if response_fut.done():
@@ -1762,7 +2058,6 @@ class AsyncWebTool:
                 asyncio.shield(response_fut), timeout=timeout
             )
         except asyncio.TimeoutError:
-            # Return partial result if we have response headers
             if matched_entry:
                 await self._try_fetch_body_async(matched_entry)
                 return dict(matched_entry) if matched_entry else None
@@ -1798,6 +2093,13 @@ class AsyncWebTool:
     # ──────────── navigation ─────────────────────────────────────────────────
 
     async def go_async(self, url: str, timeout: float = 30.0):
+        """Navigate to *url* and wait for a reliable page-load signal.
+
+        Gen-8 improvement: after readyState reaches 'complete', polls for
+        a non-empty ``document.title`` for up to 3 extra seconds.  This
+        catches Heroku cold-start responses and other servers that send an
+        almost-empty initial payload before JavaScript sets the page title.
+        """
         self._css_enabled = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
@@ -1826,12 +2128,21 @@ class AsyncWebTool:
                 except asyncio.TimeoutError:
                     pass
 
+            # Wait for readyState complete
             poll_deadline = loop.time() + 2.0
             while loop.time() < poll_deadline:
                 state = await self.js_async("document.readyState")
                 if state == "complete":
                     break
                 await asyncio.sleep(0.1)
+
+            # Gen-8: wait for non-empty title (guards against cold-start empty pages)
+            title_deadline = loop.time() + 3.0
+            while loop.time() < title_deadline:
+                title = await self.js_async("document.title")
+                if title:
+                    break
+                await asyncio.sleep(0.2)
 
             await self.js_async(_SELECTOR_SHIM_JS)
 
@@ -2272,14 +2583,10 @@ if __name__ == "__main__":
     web = WebTool()
     web.connect()
 
-    # Demo network logging
-    web.enable_network_logging()
+    print("health_check:", web.health_check())
+
     web.go("https://quotes.toscrape.com")
-    log = web.get_network_log()
-    print(f"Captured {len(log)} network events")
-    requests_made = [e for e in log if e["type"] == "Network.requestWillBeSent"]
-    print(f"  Requests: {len(requests_made)}")
-    responses = [e for e in log if e["type"] == "Network.responseReceived"]
-    print(f"  Responses: {len(responses)}")
+    title = web.js("document.title")
+    print("title:", title)
 
     web.close()
