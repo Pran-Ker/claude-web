@@ -1,16 +1,17 @@
 [
   {
     "name": "navigate",
-    "description": "Load the given URL in the active tab and wait for the page load event (event-driven, no fixed sleep).",
+    "description": "Load the given URL in the active tab and wait for a page-load signal (Page.loadEventFired OR Page.frameStoppedLoading, whichever fires first). Falls back to document.readyState check before giving up.",
     "parameters": {
-      "url": { "type": "string" }
+      "url": { "type": "string" },
+      "timeout": { "type": "number", "default": 30, "description": "Max seconds to wait for load" }
     },
     "implementation": "web.go(url)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.close()\""
   },
   {
     "name": "click",
-    "description": "Click the first element matching selector. Raises WebToolError if the element is not found.",
+    "description": "Click the first element matching selector. Uses Runtime.evaluate + DOM.requestNode so all CSS3 pseudo-selectors (:first-child, :nth-child, etc.) work. Raises WebToolError if the element is not found.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -42,7 +43,7 @@
   },
   {
     "name": "key",
-    "description": "Press a keyboard key (Tab, Enter, Escape, ArrowDown, ArrowUp, etc.).",
+    "description": "Press a keyboard key (Tab, Enter, Escape, ArrowDown, ArrowUp, etc.). Sends both keyDown and keyUp events.",
     "parameters": {
       "key": { "type": "string" }
     },
@@ -76,6 +77,15 @@
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); found = web.wait('.my-class', 15); print(found); web.close()\""
   },
   {
+    "name": "wait_for_navigation",
+    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Call this immediately after clicking a link or submit button to wait for the resulting navigation.",
+    "parameters": {
+      "timeout": { "type": "number", "default": 15 }
+    },
+    "implementation": "web.wait_for_navigation(timeout)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click('a.nav-link'); web.wait_for_navigation(15); web.close()\""
+  },
+  {
     "name": "scroll",
     "description": "Scroll the page in a given direction by a number of pixels. Useful for revealing lazy-loaded content.",
     "parameters": {
@@ -87,7 +97,7 @@
   },
   {
     "name": "hover",
-    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus.",
+    "description": "Move the mouse over the first element matching selector to trigger :hover effects and reveal dropdown menus. Uses Runtime.evaluate for robust CSS3 selector support.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -125,6 +135,65 @@
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click_by_text('Submit', 'button'); web.close()\""
   },
   {
+    "name": "get_all_links",
+    "description": "Return a list of all non-javascript: href URLs found on the current page. Single batched JS call.",
+    "parameters": {},
+    "implementation": "web.get_all_links()",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); links = web.get_all_links(); print(json.dumps(links, indent=2)); web.close()\""
+  },
+  {
+    "name": "get_table",
+    "description": "Extract the first <table> matching selector as a list of dicts. Header cells become dict keys; each body row becomes one dict. Raises WebToolError if no table found.",
+    "parameters": {
+      "selector": { "type": "string", "default": "table", "description": "CSS selector for the target <table>" }
+    },
+    "implementation": "web.get_table(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); rows = web.get_table('#myTable'); print(json.dumps(rows, indent=2)); web.close()\""
+  },
+  {
+    "name": "get_form_fields",
+    "description": "Introspect form structure. Returns a list of dicts (one per input/select/textarea) with keys: tag, type, name, id, value, placeholder, required.",
+    "parameters": {
+      "selector": { "type": "string", "default": "form", "description": "CSS selector for the form element" }
+    },
+    "implementation": "web.get_form_fields(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); fields = web.get_form_fields('#login-form'); print(json.dumps(fields, indent=2)); web.close()\""
+  },
+  {
+    "name": "open_tab",
+    "description": "Open a new browser tab and return its tab_id string. Does NOT switch focus — call switch_tab(tab_id) to interact with the new tab.",
+    "parameters": {
+      "url": { "type": "string", "default": "about:blank", "description": "Initial URL for the new tab" }
+    },
+    "implementation": "tab_id = web.open_tab(url)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); tid = web.open_tab('https://example.com'); web.switch_tab(tid); print(web.js('document.title')); web.close()\""
+  },
+  {
+    "name": "switch_tab",
+    "description": "Reconnect the WebSocket to the tab identified by tab_id. All subsequent commands operate on that tab.",
+    "parameters": {
+      "tab_id": { "type": "string" }
+    },
+    "implementation": "web.switch_tab(tab_id)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); tid = web.open_tab('https://example.com'); web.switch_tab(tid); web.close()\""
+  },
+  {
+    "name": "close_tab",
+    "description": "Close the tab identified by tab_id. If it is the current tab, the WebSocket is also closed.",
+    "parameters": {
+      "tab_id": { "type": "string" }
+    },
+    "implementation": "web.close_tab(tab_id)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); tid = web.open_tab(); web.close_tab(tid); web.close()\""
+  },
+  {
+    "name": "get_open_tabs",
+    "description": "Return a list of dicts for every open page-type tab, each with keys: id, url, title.",
+    "parameters": {},
+    "implementation": "web.get_open_tabs()",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); print(json.dumps(web.get_open_tabs(), indent=2)); web.close()\""
+  },
+  {
     "name": "coordinate_click",
     "description": "Click at specific x,y page coordinates. Fallback when CSS selectors cannot identify the target.",
     "parameters": {
@@ -151,6 +220,28 @@
     },
     "implementation": "Compare web.js('window.location.href') with initial_url; search web.js('document.body.textContent.toLowerCase()') for success_keywords.",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); final_url = web.js('window.location.href'); page_text = web.js('document.body.textContent.toLowerCase()'); success = any(k in page_text for k in ['success','complete','confirmed']); print(f'URL changed: {final_url != initial_url}, Success: {success}'); web.close()\""
+  },
+  {
+    "name": "browser_pool",
+    "description": "Create and manage a pool of N independent headless Chrome processes with thread-safe acquire/release semantics for parallel task execution.",
+    "parameters": {
+      "size": { "type": "number", "default": 3, "description": "Number of Chrome processes in the pool" },
+      "headless": { "type": "boolean", "default": true },
+      "port_start": { "type": "number", "default": 9300 }
+    },
+    "implementation": "from tools.browser_pool import BrowserPool; pool = BrowserPool(size=3); pool.start(); web = pool.acquire(); ...; pool.release(web); pool.stop()",
+    "bash_usage": "python3 -c \"from tools.browser_pool import BrowserPool; pool = BrowserPool(size=2); pool.start(); web = pool.acquire(); web.go('https://example.com'); print(web.js('document.title')); pool.release(web); pool.stop()\"",
+    "context_manager": "with pool.borrow() as web: web.go('https://example.com')"
+  },
+  {
+    "name": "async_web_tool",
+    "description": "Fully async CDP browser automation via AsyncWebTool (uses 'websockets' library). Provides go_async, cmd_async, js_async, click_async, fill_async, wait_async, screenshot_async.",
+    "parameters": {
+      "port": { "type": "number", "default": 9222 }
+    },
+    "implementation": "from tools.web_tool import AsyncWebTool; web = AsyncWebTool(port=9222); await web.connect(); await web.go_async('URL'); title = await web.js_async('document.title'); await web.close()",
+    "bash_usage": "python3 -c \"import asyncio; from tools.web_tool import AsyncWebTool\nasync def main():\n    web = AsyncWebTool(9222)\n    await web.connect()\n    await web.go_async('https://example.com')\n    print(await web.js_async('document.title'))\n    await web.close()\nasyncio.run(main())\"",
+    "requires": "pip install websockets"
   },
   {
     "name": "clone_website",
