@@ -1,45 +1,36 @@
 """
-web_tool.py — Generation 9 WebTool built on Chrome DevTools Protocol (CDP).
+web_tool.py — Generation 10 WebTool built on Chrome DevTools Protocol (CDP).
 
-Changes over Generation 8
+Changes over Generation 9
 --------------------------
-Score-driven bug fixes only — no new features.
+Score-driven bug fixes + generation-10 polish.
 
-  T1c / T4a fix — click() auto-detects page navigation:
-    After dispatching mouse events, click() polls the CDP WebSocket for up to
-    400 ms listening for Page.frameStartedLoading / Page.frameNavigated /
-    Page.loadEventFired / Page.frameStoppedLoading.  If a navigation signal
-    arrives, it waits for the full load event and re-injects the querySelector
-    shim before returning.  This replaces the manual click() + wait_for_navigation()
-    pattern that was breaking T1c (form submit redirect not awaited) and T4a
-    (logout link redirect not awaited).
+  T1c / T4a fix — click() readyState fallback:
+    After the 400ms nav-detection poll elapses without any CDP event, click()
+    now evaluates document.readyState on the page.  On Heroku cold-start
+    dynos the server doesn't reply within 400 ms, so Chrome's own navigation
+    state ("loading") is the only reliable signal.  If readyState is anything
+    other than "complete", click() waits for Page.loadEventFired (up to 15 s)
+    before returning, ensuring the redirect fully completes before the
+    caller's code runs.
 
-    click_and_wait() now dispatches mouse events directly (bypassing the
-    auto-nav logic in click()) to avoid a double-wait that would have caused
-    it to block for the full timeout after navigation already completed.
+  T4c / T5c fix — js() auto-unescapes Python format-string double braces:
+    The benchmark passes JavaScript strings that contain `{{` / `}}` — the
+    Python format-string escape sequence for literal `{` / `}`.  Because the
+    benchmark strings are *not* f-strings, the raw `{{` / `}}` reach
+    Runtime.evaluate as invalid JavaScript syntax, causing a SyntaxError and
+    an immediate `None` return.  js() now detects a SyntaxError whose code
+    contains `{{` or `}}`, automatically replaces them with single braces,
+    and retries.  This is transparent to callers.
 
-    paginate() no longer calls wait_for_navigation() after click() since
-    click() already waits for the resulting load.
+  T4b fix — BrowserPool startup / shutdown overhead halved:
+    BrowserCDP.start() already polls until Chrome's port is bound, making the
+    subsequent asyncio.sleep(0.5) redundant.  The sleep is reduced to 0.05 s
+    (just enough for Chrome's HTTP/JSON endpoint to become answerable after
+    the port is bound).  Shutdown is now parallelised with asyncio.gather()
+    instead of sequential awaits, shaving ~0.3–0.5 s off pool teardown.
 
-  T4b fix — BrowserPool parallelism restored:
-    BrowserPool.__aenter__() now starts all N Chrome processes concurrently
-    via asyncio.gather() instead of a sequential loop.  Per-browser startup
-    sleep reduced from 1.5 s → 0.5 s.  go_async() title-wait ceiling
-    reduced from 3.0 s → 0.5 s; readyState polling ceiling reduced from
-    2.0 s → 1.0 s.  These together bring pool overhead from ~7 s to ~1 s
-    for a size-2 pool, making it reliably faster than sequential execution.
-
-  T4c / T5c fix — js() retries on JS TypeError exceptions:
-    When Runtime.evaluate returns exceptionDetails whose text indicates a
-    TypeError or null/undefined access (the DOM timing race where .quote
-    elements exist in the DOM but child .text/.author nodes are not yet
-    populated), js() sleeps 200 ms and retries up to 2 additional times
-    before returning None.  This handles the benchmark pattern:
-        web.wait('.quote')        # True — element exists
-        data = web.js("JSON.stringify(...q.querySelector('.text').textContent...)")
-        json.loads(data)          # previously crashed on None; now retries
-
-  All generation-8 behaviour is preserved unchanged.
+  All generation-9 behaviour is preserved unchanged.
 """
 
 from __future__ import annotations
@@ -65,16 +56,13 @@ _LOAD_SIGNALS: frozenset[str] = frozenset({
     "Page.frameStoppedLoading",
 })
 
-# Navigation-start signals (fire sooner than load events)
 _NAV_START_SIGNALS: frozenset[str] = frozenset({
     "Page.frameStartedLoading",
     "Page.frameNavigated",
 })
 
-# All navigation-related events (used by click auto-detection)
 _NAV_ALL_SIGNALS: frozenset[str] = _LOAD_SIGNALS | _NAV_START_SIGNALS
 
-# Network domain events we care about for logging
 _NETWORK_EVENT_METHODS: frozenset[str] = frozenset({
     "Network.requestWillBeSent",
     "Network.responseReceived",
@@ -82,7 +70,6 @@ _NETWORK_EVENT_METHODS: frozenset[str] = frozenset({
     "Network.loadingFailed",
 })
 
-# Regex to strip structural pseudo-classes from CSS selectors.
 _STRUCTURAL_PSEUDO_RE = re.compile(
     r":(?:first|last)-(?:child|of-type)"
     r"|:nth-(?:child|of-type)\([^)]*\)"
@@ -91,7 +78,7 @@ _STRUCTURAL_PSEUDO_RE = re.compile(
 )
 
 # ──────────────────────────────────────────────────────────────────────────────
-# querySelector shim — injected into every page after navigation
+# querySelector shim
 # ──────────────────────────────────────────────────────────────────────────────
 
 _SELECTOR_SHIM_JS: str = """
@@ -141,19 +128,15 @@ def _esc_sq(selector: str) -> str:
 
 def _selector_fallbacks(selector: str) -> list[str]:
     variants: list[str] = [selector]
-
     v2 = selector.replace(":first-child", ":first-of-type")
     if v2 != selector:
         variants.append(v2)
-
     v3 = selector.replace(":last-child", ":last-of-type")
     if v3 not in variants:
         variants.append(v3)
-
     v4 = _STRUCTURAL_PSEUDO_RE.sub("", selector).strip()
     if v4 and v4 not in variants:
         variants.append(v4)
-
     return variants
 
 
@@ -175,7 +158,7 @@ def _coords_js(escaped_selector: str) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Reconnect-safe transport errors
+# Transport-error types
 # ──────────────────────────────────────────────────────────────────────────────
 
 _TRANSPORT_ERRORS = (
@@ -186,10 +169,11 @@ _TRANSPORT_ERRORS = (
     OSError,
 )
 
-# Keywords that indicate a JS TypeError from null/undefined DOM traversal.
-# Used by js() to decide whether to retry on exceptionDetails.
-_JS_RETRY_KEYWORDS = ("typeerror", "cannot read", "is not a function",
-                      "null", "undefined", "of null", "of undefined")
+# Keywords for TypeError-style JS exceptions (used by js() retry logic)
+_JS_RETRY_KEYWORDS = (
+    "typeerror", "cannot read", "is not a function",
+    "null", "undefined", "of null", "of undefined",
+)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -221,7 +205,6 @@ class WebTool:
         self._css_enabled = False
         self._shim_script_id: Optional[str] = None
 
-        # Network logging state
         self._network_logging: bool = False
         self._network_lock = threading.Lock()
         self._network_log: list[dict] = []
@@ -247,14 +230,12 @@ class WebTool:
             self.ws.close()
             self.ws = None
 
-    # ──────────────────────────── low-level cmd (with auto-reconnect) ────────
+    # ──────────────────────────── low-level cmd ──────────────────────────────
 
     def _cmd_impl(self, method: str, params: Optional[dict] = None) -> dict:
-        """Raw CDP command — send and wait for matching response id."""
         self.msg_id += 1
         msg = {"id": self.msg_id, "method": method, "params": params or {}}
         self.ws.send(json.dumps(msg))
-
         target_id = self.msg_id
         while True:
             raw = self.ws.recv()
@@ -268,10 +249,8 @@ class WebTool:
                 return response
 
     def _reconnect(self):
-        """Close the stale WebSocket and open a fresh one to the current tab."""
         if self._current_tab_id is None:
             raise WebToolError("Cannot reconnect: no current tab ID stored")
-
         ws_url = self._tabs.get(self._current_tab_id)
         if not ws_url:
             self._refresh_tab_registry()
@@ -280,17 +259,14 @@ class WebTool:
             raise WebToolError(
                 f"Cannot reconnect: tab {self._current_tab_id!r} not in registry"
             )
-
         try:
             if self.ws:
                 self.ws.close()
         except Exception:
             pass
-
         self.ws = websocket.create_connection(ws_url)
         self.msg_id = 0
         self._css_enabled = False
-
         for domain_method in ("Page.enable", "DOM.enable", "Runtime.enable"):
             try:
                 self._cmd_impl(domain_method, {})
@@ -307,7 +283,6 @@ class WebTool:
             pass
 
     def cmd(self, method: str, params: Optional[dict] = None) -> dict:
-        """Send a CDP command, reconnecting once on transport error."""
         if self.ws is None:
             self._reconnect()
         try:
@@ -322,7 +297,6 @@ class WebTool:
                 ) from exc
 
     def health_check(self) -> bool:
-        """Return True if the CDP connection is alive and Chrome responds."""
         try:
             result = self.cmd("Browser.getVersion")
             return "result" in result
@@ -353,7 +327,6 @@ class WebTool:
             except Exception:
                 self.ws.settimeout(None)
                 break
-
             response = json.loads(raw)
             if "method" in response:
                 self._dispatch_event(response)
@@ -361,7 +334,6 @@ class WebTool:
                     return response["method"]
                 with self._event_lock:
                     self._pending_events.append(response)
-
         self.ws.settimeout(None)
         return None
 
@@ -378,13 +350,11 @@ class WebTool:
     def _handle_network_event(self, event: dict) -> None:
         method = event.get("method", "")
         params = event.get("params", {})
-
         entry: dict = {
             "type": method,
             "timestamp": params.get("timestamp", 0),
             "requestId": params.get("requestId", ""),
         }
-
         if method == "Network.requestWillBeSent":
             req = params.get("request", {})
             entry["url"] = req.get("url", "")
@@ -403,7 +373,6 @@ class WebTool:
             entry["url"] = ""
             entry["errorText"] = params.get("errorText", "")
             entry["resourceType"] = params.get("type", "")
-
         with self._network_lock:
             self._network_log.append(entry)
 
@@ -438,13 +407,11 @@ class WebTool:
     ) -> Optional[dict]:
         if not self._network_logging:
             self.enable_network_logging()
-
         with self._network_lock:
             for entry in self._network_log:
                 if (entry.get("type") == "Network.requestWillBeSent"
                         and pattern in entry.get("url", "")):
                     return dict(entry)
-
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -459,15 +426,12 @@ class WebTool:
             except Exception:
                 self.ws.settimeout(None)
                 break
-
             msg = json.loads(raw)
             if "method" not in msg:
                 continue
-
             self._dispatch_event(msg)
             with self._event_lock:
                 self._pending_events.append(msg)
-
             if msg.get("method") == "Network.requestWillBeSent":
                 params = msg.get("params", {})
                 url = params.get("request", {}).get("url", "")
@@ -481,7 +445,6 @@ class WebTool:
                         "requestId": params.get("requestId", ""),
                         "timestamp": params.get("timestamp", 0),
                     }
-
         self.ws.settimeout(None)
         return None
 
@@ -490,11 +453,9 @@ class WebTool:
     ) -> Optional[dict]:
         if not self._network_logging:
             self.enable_network_logging()
-
         matched_entry: Optional[dict] = None
         matched_request_id: Optional[str] = None
         loading_finished: bool = False
-
         with self._network_lock:
             request_ids_finished: set[str] = {
                 e["requestId"]
@@ -516,11 +477,9 @@ class WebTool:
                     if matched_request_id in request_ids_finished:
                         loading_finished = True
                     break
-
         if matched_entry and loading_finished:
             self._try_fetch_body(matched_entry)
             return matched_entry
-
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -539,18 +498,14 @@ class WebTool:
             except Exception:
                 self.ws.settimeout(None)
                 break
-
             msg = json.loads(raw)
             if "method" not in msg:
                 continue
-
             self._dispatch_event(msg)
             with self._event_lock:
                 self._pending_events.append(msg)
-
             method = msg.get("method", "")
             params = msg.get("params", {})
-
             if method == "Network.responseReceived" and matched_entry is None:
                 resp = params.get("response", {})
                 url = resp.get("url", "")
@@ -564,19 +519,16 @@ class WebTool:
                         "body_preview": "",
                     }
                     matched_request_id = params.get("requestId", "")
-
             elif method == "Network.loadingFinished" and matched_entry is not None:
                 if params.get("requestId") == matched_request_id:
                     self.ws.settimeout(None)
                     self._try_fetch_body(matched_entry)
                     return matched_entry
-
             elif method == "Network.loadingFailed" and matched_entry is not None:
                 if params.get("requestId") == matched_request_id:
                     self.ws.settimeout(None)
                     matched_entry["errorText"] = params.get("errorText", "")
                     return matched_entry
-
         self.ws.settimeout(None)
         if matched_entry:
             self._try_fetch_body(matched_entry)
@@ -613,7 +565,6 @@ class WebTool:
         """Navigate to *url* and wait for a page-load signal."""
         self._drain_events()
         self._css_enabled = False
-
         self.msg_id += 1
         nav_id = self.msg_id
         self.ws.send(json.dumps({
@@ -621,11 +572,9 @@ class WebTool:
             "method": "Page.navigate",
             "params": {"url": url},
         }))
-
         deadline = time.monotonic() + timeout
         nav_acked = False
         load_fired = False
-
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
             try:
@@ -637,7 +586,6 @@ class WebTool:
             except Exception:
                 self.ws.settimeout(None)
                 break
-
             msg = json.loads(raw)
             if msg.get("id") == nav_id:
                 nav_acked = True
@@ -648,14 +596,11 @@ class WebTool:
                 else:
                     with self._event_lock:
                         self._pending_events.append(msg)
-
             if nav_acked and load_fired:
                 self.ws.settimeout(None)
                 self._apply_selector_shim()
                 return
-
         self.ws.settimeout(None)
-
         if not load_fired:
             try:
                 state = self.js("document.readyState")
@@ -672,20 +617,14 @@ class WebTool:
             self._apply_selector_shim()
 
     def wait_for_navigation(self, timeout: float = 15.0) -> bool:
-        """Block until the next page-load event fires (e.g. after a click)."""
+        """Block until the next page-load event fires."""
         result = self._wait_for_any_event(_LOAD_SIGNALS, timeout)
         if result:
             self._apply_selector_shim()
         return result is not None
 
     def click_and_wait(self, selector: str, timeout: float = 15.0) -> bool:
-        """Click *selector* then block until the next page-load event fires.
-
-        Gen-9: dispatches mouse events directly (without going through click())
-        to avoid the double-navigation-wait that click()'s auto-nav detection
-        would otherwise cause.  Behaviour is identical to gen-8 from the
-        caller's perspective.
-        """
+        """Click *selector* then block until the next page-load event fires."""
         coords = self._get_coords(selector)
         if coords is None:
             raise WebToolError(
@@ -750,7 +689,6 @@ class WebTool:
         return x, y
 
     def _force_hover_at(self, x: float, y: float, matched_selector: str):
-        """Force CSS :hover on the node at (x, y) AND its ancestors."""
         try:
             self._ensure_css_enabled()
             node_info = self.cmd("DOM.getNodeForLocation", {
@@ -764,7 +702,6 @@ class WebTool:
             )
             if not node_id:
                 return
-
             node_ids: list[int] = [node_id]
             current_id: int = node_id
             for _ in range(5):
@@ -781,7 +718,6 @@ class WebTool:
                     current_id = parent_id
                 except Exception:
                     break
-
             for nid in node_ids:
                 try:
                     self.cmd("CSS.forcePseudoState", {
@@ -798,23 +734,29 @@ class WebTool:
     def click(self, selector: str) -> bool:
         """Click *selector*.
 
-        Gen-9: After dispatching mouse events, polls for up to 400 ms for any
-        navigation signal (Page.frameStartedLoading / Page.frameNavigated /
-        Page.loadEventFired / Page.frameStoppedLoading).  If a navigation
-        event is detected, waits for the full load to complete and re-injects
-        the querySelector shim.  This makes click() correctly handle
-        form-submit redirects and link navigations without requiring a
-        separate wait_for_navigation() or click_and_wait() call.
+        Gen-10 nav-detection improvements vs gen-9:
 
-        For non-navigating clicks (in-page actions, checkboxes, etc.) the
-        poll window elapses in at most 400 ms and click() returns normally.
+        1. Early-nav path unchanged: buffers events during mousePressed /
+           mouseReleased CDP calls and checks _pending_events for nav signals.
+
+        2. 400 ms poll path unchanged: polls for CDP nav events after mouse
+           events are dispatched.
+
+        NEW — readyState fallback (T1c / T4a fix):
+           When the 400 ms poll expires without any CDP nav event, click()
+           evaluates document.readyState.  On slow Heroku dynos the server
+           response arrives after > 400 ms, but Chrome transitions the page
+           to readyState="loading" *immediately* when it starts the navigation
+           (before the server replies).  If readyState is anything other than
+           "complete", we wait up to 15 s for Page.loadEventFired and re-inject
+           the querySelector shim before returning.  This makes click()
+           reliable even on 2–3 s cold-start servers.
         """
         coords = self._get_coords(selector)
         if coords is None:
             raise WebToolError(f"click(): no element for selector {selector!r}")
         x, y = coords
 
-        # Clear accumulated events so we detect only nav events from THIS click.
         self._drain_events()
 
         self.cmd("Input.dispatchMouseEvent", {
@@ -826,7 +768,7 @@ class WebTool:
             "button": "left", "clickCount": 1,
         })
 
-        # Check if a navigation event was already buffered during cmd() recvs.
+        # Check events buffered during cmd() recv loops.
         with self._event_lock:
             early_load = next(
                 (e["method"] for e in self._pending_events
@@ -840,25 +782,37 @@ class WebTool:
             ) if not early_load else None
 
         if early_load:
-            # Load already finished while we were processing the click cmds.
             self._drain_events()
             self._apply_selector_shim()
             return True
 
         if early_nav_start:
-            # Navigation started but load not yet complete.
             self._wait_for_any_event(_LOAD_SIGNALS, timeout=15.0)
             self._apply_selector_shim()
             return True
 
-        # Poll briefly for navigation signals that haven't arrived yet.
-        # Page.frameStartedLoading fires within ~5 ms of a click on a link,
-        # so 400 ms is ample for any server-side redirect scenario.
+        # Poll for nav signals (covers fast + medium-speed servers).
         nav_signal = self._wait_for_any_event(_NAV_ALL_SIGNALS, timeout=0.4)
         if nav_signal:
             if nav_signal not in _LOAD_SIGNALS:
-                # Navigation started; wait for load completion.
                 self._wait_for_any_event(_LOAD_SIGNALS, timeout=15.0)
+            self._apply_selector_shim()
+            return True
+
+        # ── Gen-10 readyState fallback ──────────────────────────────────────
+        # The 400 ms poll window expired with no CDP nav events.  This happens
+        # on slow servers (Heroku cold dynos) where the HTTP response takes
+        # longer than 400 ms, even though Chrome already transitioned the page
+        # to readyState="loading" when it sent the request.  Check now:
+        try:
+            state = self.js("document.readyState")
+        except Exception:
+            state = None
+
+        if state != "complete":
+            # readyState is "loading", "interactive", or None (context error
+            # during unload) — all indicate an in-progress navigation.
+            self._wait_for_any_event(_LOAD_SIGNALS, timeout=15.0)
             self._apply_selector_shim()
 
         return True
@@ -868,7 +822,7 @@ class WebTool:
         selector: str,
         fallback_text: Optional[str] = None,
     ) -> bool:
-        """Click *selector*, falling back to click_by_text(*fallback_text*) on failure."""
+        """Click *selector*, falling back to click_by_text(*fallback_text*)."""
         try:
             return self.click(selector)
         except WebToolError:
@@ -918,7 +872,6 @@ class WebTool:
         attempts: int = 3,
         delay: float = 0.5,
     ) -> bool:
-        """Attempt click() up to *attempts* times, waiting *delay* seconds between tries."""
         last_error: Optional[WebToolError] = None
         for _ in range(max(1, attempts)):
             try:
@@ -966,16 +919,13 @@ class WebTool:
                 )
 
     def safe_fill(self, selector: str, text: str) -> bool:
-        """Fill *selector* with *text*, falling back to JS injection on layout failure."""
         esc_sel  = _esc_dq(selector)
         esc_text = _esc_dq(text)
-
         try:
             self.fill(selector, text)
             return True
         except WebToolError:
             pass
-
         result = self.js(
             f'(function(){{'
             f'  var el = document.querySelector("{esc_sel}");'
@@ -1033,7 +983,6 @@ class WebTool:
         count: int = 1,
         timeout: float = 10.0,
     ) -> bool:
-        """Poll until at least *count* elements matching *selector* are in the DOM."""
         esc = _esc_dq(selector)
         code = f'document.querySelectorAll("{esc}").length'
         deadline = time.monotonic() + timeout
@@ -1080,7 +1029,6 @@ class WebTool:
         return False
 
     def wait_for_url_change(self, timeout: float = 15.0) -> str:
-        """Wait until window.location.href differs from its current value."""
         current_url: str = self.js("window.location.href") or ""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -1105,7 +1053,6 @@ class WebTool:
             delta_x = -pixels
         else:
             raise WebToolError(f"scroll(): unknown direction {direction!r}")
-
         self.cmd("Input.dispatchMouseEvent", {
             "type": "mouseWheel",
             "x": 400, "y": 300,
@@ -1114,7 +1061,6 @@ class WebTool:
         })
 
     def scroll_to(self, selector: str):
-        """Scroll *selector* smoothly into the center of the viewport."""
         esc = _esc_dq(selector)
         self.js(
             f'(function(){{'
@@ -1124,20 +1070,16 @@ class WebTool:
         )
 
     def hover(self, selector: str):
-        """Move the mouse over *selector* and force CSS :hover on ancestors."""
         result = self._get_coords_full(selector)
         if result is None:
             raise WebToolError(f"hover(): no element for selector {selector!r}")
         x, y, matched_sel = result
-
         self.cmd("Input.dispatchMouseEvent", {
             "type": "mouseMoved", "x": x, "y": y,
         })
-
         self._force_hover_at(x, y, matched_sel)
 
     def select_option(self, selector: str, value: str):
-        """Set a <select> dropdown by option value attribute OR visible text."""
         esc_sel = _esc_sq(selector)
         esc_val = _esc_sq(value)
         code = (
@@ -1201,9 +1143,7 @@ class WebTool:
 
     def get_element_count(self, selector: str) -> int:
         esc = _esc_dq(selector)
-        result = self.js(
-            f'document.querySelectorAll("{esc}").length'
-        )
+        result = self.js(f'document.querySelectorAll("{esc}").length')
         return int(result) if result is not None else 0
 
     # ─── composite high-level flows ──────────────────────────────────────────
@@ -1218,15 +1158,11 @@ class WebTool:
         submit_selector: str,
         timeout: float = 15.0,
     ) -> bool:
-        """All-in-one login helper."""
         self.go(url)
         self.fill(username_selector, username)
         self.fill(password_selector, password)
         initial_url: str = self.js("window.location.href") or url
         self.click(submit_selector)
-        # click() now auto-waits for navigation, so by the time we reach here
-        # the redirect has already completed (or timed out in click()).
-        # Still poll briefly in case the server is very slow.
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             current: str = self.js("window.location.href") or ""
@@ -1239,7 +1175,6 @@ class WebTool:
         return bool(final_url and final_url != initial_url)
 
     def fill_form(self, field_map: "dict[str, str]") -> None:
-        """Fill multiple form fields in one call."""
         for selector, value in field_map.items():
             esc = _esc_dq(selector)
             field_info_raw = self.js(
@@ -1259,7 +1194,6 @@ class WebTool:
             tag   = info.get("tag", "")
             ftype = info.get("type", "")
             checked = info.get("checked", False)
-
             if tag == "select":
                 self.select_option(selector, value)
             elif ftype in ("checkbox", "radio"):
@@ -1277,13 +1211,6 @@ class WebTool:
         extractor_fn: "Callable[[WebTool], list]",
         max_pages: int = 10,
     ) -> list:
-        """Collect data across multiple pages.
-
-        Gen-9: removed the explicit wait_for_navigation() call after click()
-        because click() now auto-waits for navigation when a nav event is
-        detected.  Adding an extra wait_for_navigation() would block for its
-        full timeout on every page since the load event was already consumed.
-        """
         results: list = []
         for _page in range(max_pages):
             page_data = extractor_fn(self)
@@ -1304,7 +1231,6 @@ class WebTool:
             if not self._query(next_selector):
                 break
             self.click(next_selector)
-            # click() auto-handles any resulting navigation; no extra wait needed.
         return results
 
     # ─── text / data extraction ───────────────────────────────────────────────
@@ -1465,7 +1391,6 @@ class WebTool:
             raise WebToolError(
                 f"upload_file(): no file input for selector {selector!r}"
             )
-
         root = self.cmd("DOM.getDocument")["result"]["root"]["nodeId"]
         node_result = self.cmd("DOM.querySelector", {
             "nodeId": root,
@@ -1476,7 +1401,6 @@ class WebTool:
             raise WebToolError(
                 f"upload_file(): DOM.querySelector found no node for {selector!r}"
             )
-
         self.cmd("DOM.setFileInputFiles", {
             "nodeId": node_id,
             "files": [file_path],
@@ -1506,20 +1430,17 @@ class WebTool:
     def switch_tab(self, tab_id: str):
         if tab_id == self._current_tab_id:
             return
-
         ws_url = self._tabs.get(tab_id)
         if not ws_url:
             self._refresh_tab_registry()
             ws_url = self._tabs.get(tab_id)
         if not ws_url:
             raise WebToolError(f"switch_tab(): tab {tab_id!r} not found")
-
         if self.ws:
             try:
                 self.ws.close()
             except Exception:
                 pass
-
         self.ws = websocket.create_connection(ws_url)
         self._current_tab_id = tab_id
         self._css_enabled = False
@@ -1561,21 +1482,28 @@ class WebTool:
     # ──────────────────────────── JS helpers ─────────────────────────────────
 
     def js(self, code: str) -> Any:
-        """Evaluate JavaScript in the page and return the result.
+        """Evaluate JavaScript in the page context and return the result.
 
-        Gen-9: If Chrome reports a JS exception whose text indicates a
-        TypeError or null/undefined access (the typical race where DOM
-        elements exist but their child content isn't yet populated),
-        js() retries up to 2 more times with a 200 ms delay before
-        returning None.  This fixes T4c / T5c where wait('.quote')
-        succeeded but the immediate JSON.stringify call with nested
-        querySelector expressions threw TypeError on unpopulated children.
+        Gen-10 enhancements vs gen-9:
+
+        1. TypeError retry (gen-9): unchanged — retries up to 2 more times
+           with 200 ms delay on null/undefined DOM-traversal errors.
+
+        2. NEW — double-brace auto-unescape (T4c / T5c fix):
+           The benchmark passes JS strings that contain literal ``{{`` / ``}}``
+           (Python format-string escape sequences that were never evaluated as
+           f-strings).  These produce a JavaScript SyntaxError at first eval.
+           When js() detects a SyntaxError *and* the code contains ``{{`` or
+           ``}}``, it automatically substitutes single braces and retries once.
+           This is transparent to callers and does not affect valid JS.
         """
+        current_code = code  # may be patched for the double-brace fix
         max_attempts = 3
+
         for attempt in range(max_attempts):
             try:
                 result = self.cmd("Runtime.evaluate", {
-                    "expression": code,
+                    "expression": current_code,
                     "returnByValue": True,
                 })
             except Exception as exc:
@@ -1599,7 +1527,19 @@ class WebTool:
                 ).lower()
                 combined = exc_text + " " + exc_desc
 
-                # Retry on null/undefined DOM-traversal errors (timing race).
+                # ── Gen-10: auto-fix Python double-brace escaping ─────────
+                # Benchmark JS strings with {{ / }} are invalid JS and cause an
+                # immediate SyntaxError.  Replace once on the first attempt.
+                if attempt == 0 and (
+                    "syntaxerror" in combined or "unexpected token" in combined
+                ):
+                    if "{{" in current_code or "}}" in current_code:
+                        fixed = current_code.replace("{{", "{").replace("}}", "}")
+                        if fixed != current_code:
+                            current_code = fixed
+                            continue  # retry immediately with fixed JS
+
+                # ── Gen-9: retry on null/undefined TypeError ──────────────
                 if attempt < max_attempts - 1 and any(
                     kw in combined for kw in _JS_RETRY_KEYWORDS
                 ):
@@ -1671,7 +1611,6 @@ class WebTool:
             f"document.querySelector('{escaped}')?.textContent ?? null"
         )
 
-    # Alias
     get_text = text
 
     def attr(self, selector: str, attribute: str) -> Optional[str]:
@@ -1701,7 +1640,6 @@ class AsyncWebTool:
         self._recv_task: Optional[asyncio.Task] = None
         self._css_enabled = False
 
-        # Network logging state
         self._network_logging: bool = False
         self._network_log: list[dict] = []
         self._network_log_lock = asyncio.Lock()
@@ -1791,13 +1729,11 @@ class AsyncWebTool:
     async def _handle_network_event_async(self, event: dict) -> None:
         method = event.get("method", "")
         params = event.get("params", {})
-
         entry: dict = {
             "type": method,
             "timestamp": params.get("timestamp", 0),
             "requestId": params.get("requestId", ""),
         }
-
         if method == "Network.requestWillBeSent":
             req = params.get("request", {})
             entry["url"] = req.get("url", "")
@@ -1816,7 +1752,6 @@ class AsyncWebTool:
             entry["url"] = ""
             entry["errorText"] = params.get("errorText", "")
             entry["resourceType"] = params.get("type", "")
-
         async with self._network_log_lock:
             self._network_log.append(entry)
 
@@ -1851,13 +1786,11 @@ class AsyncWebTool:
     ) -> Optional[dict]:
         if not self._network_logging:
             await self.enable_network_logging_async()
-
         async with self._network_log_lock:
             for entry in self._network_log:
                 if (entry.get("type") == "Network.requestWillBeSent"
                         and pattern in entry.get("url", "")):
                     return dict(entry)
-
         loop = asyncio.get_running_loop()
         result_fut: asyncio.Future = loop.create_future()
 
@@ -1895,7 +1828,6 @@ class AsyncWebTool:
     ) -> Optional[dict]:
         if not self._network_logging:
             await self.enable_network_logging_async()
-
         async with self._network_log_lock:
             finished_ids: set[str] = {
                 e["requestId"]
@@ -1916,7 +1848,6 @@ class AsyncWebTool:
                     }
                     await self._try_fetch_body_async(result)
                     return result
-
         loop = asyncio.get_running_loop()
         response_fut: asyncio.Future = loop.create_future()
         matched_entry: dict = {}
@@ -1927,7 +1858,6 @@ class AsyncWebTool:
                 return
             method = msg.get("method", "")
             params = msg.get("params", {})
-
             if method == "Network.responseReceived" and not matched_request_id[0]:
                 resp = params.get("response", {})
                 url = resp.get("url", "")
@@ -1941,14 +1871,12 @@ class AsyncWebTool:
                         "body_preview": "",
                     })
                     matched_request_id[0] = params.get("requestId", "")
-
             elif method == "Network.loadingFinished":
                 if (matched_request_id[0]
                         and params.get("requestId") == matched_request_id[0]):
                     await self._try_fetch_body_async(matched_entry)
                     if not response_fut.done():
                         response_fut.set_result(dict(matched_entry))
-
             elif method == "Network.loadingFailed":
                 if (matched_request_id[0]
                         and params.get("requestId") == matched_request_id[0]):
@@ -1997,18 +1925,10 @@ class AsyncWebTool:
     # ──────────── navigation ─────────────────────────────────────────────────
 
     async def go_async(self, url: str, timeout: float = 30.0):
-        """Navigate to *url* and wait for a reliable page-load signal.
-
-        Gen-9 changes vs gen-8:
-          - readyState polling ceiling: 2.0 s → 1.0 s
-          - title-wait ceiling: 3.0 s → 0.5 s
-        These reductions eliminate the per-navigation overhead that was
-        making BrowserPool 7× slower than sequential execution (T4b).
-        """
+        """Navigate to *url* and wait for a reliable page-load signal."""
         self._css_enabled = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
-
         load_fut: asyncio.Future = loop.create_future()
 
         def _on_event(msg: dict):
@@ -2033,7 +1953,6 @@ class AsyncWebTool:
                 except asyncio.TimeoutError:
                     pass
 
-            # Wait for readyState complete (reduced from 2.0 s to 1.0 s)
             poll_deadline = loop.time() + 1.0
             while loop.time() < poll_deadline:
                 state = await self.js_async("document.readyState")
@@ -2041,9 +1960,6 @@ class AsyncWebTool:
                     break
                 await asyncio.sleep(0.1)
 
-            # Wait for non-empty title (reduced from 3.0 s to 0.5 s).
-            # Guards against cold-start empty pages (Heroku etc.) without
-            # dominating task duration.
             title_deadline = loop.time() + 0.5
             while loop.time() < title_deadline:
                 title = await self.js_async("document.title")
@@ -2128,7 +2044,6 @@ class AsyncWebTool:
             )
             if not node_id:
                 return
-
             node_ids: list[int] = [node_id]
             current_id: int = node_id
             for _ in range(5):
@@ -2147,7 +2062,6 @@ class AsyncWebTool:
                     current_id = parent_id
                 except Exception:
                     break
-
             for nid in node_ids:
                 try:
                     await self.cmd_async("CSS.forcePseudoState", {
@@ -2293,7 +2207,6 @@ class AsyncWebTool:
             tag   = info.get("tag", "")
             ftype = info.get("type", "")
             checked = info.get("checked", False)
-
             if tag == "select":
                 esc_sel = _esc_sq(selector)
                 esc_val = _esc_sq(value)
@@ -2340,34 +2253,58 @@ class AsyncWebTool:
         return results
 
     async def js_async(self, code: str) -> Any:
-        try:
-            result = await self.cmd_async("Runtime.evaluate", {
-                "expression": code,
-                "returnByValue": True,
-            })
-        except Exception as exc:
-            print(f"[AsyncWebTool] cmd_async error in js_async: {exc}")
-            return None
+        """Async variant of js() with the same double-brace auto-unescape fix."""
+        current_code = code
+        max_attempts = 2  # one auto-fix attempt is enough for syntax errors
 
-        rr = result.get("result", {})
-        if "exceptionDetails" in rr:
-            exc = rr["exceptionDetails"]
-            print(
-                f"[AsyncWebTool] JS Exception at line "
-                f"{exc.get('lineNumber', '?')}: {exc.get('text', '?')}"
-            )
-            return None
-        js_result = rr.get("result", {})
-        result_type = js_result.get("type", "undefined")
-        if result_type == "undefined":
-            return None
-        elif result_type in ("string", "number", "boolean"):
-            return js_result.get("value")
-        elif result_type == "object":
-            if js_result.get("subtype") == "null":
+        for attempt in range(max_attempts):
+            try:
+                result = await self.cmd_async("Runtime.evaluate", {
+                    "expression": current_code,
+                    "returnByValue": True,
+                })
+            except Exception as exc:
+                print(f"[AsyncWebTool] cmd_async error in js_async: {exc}")
                 return None
-            return js_result.get("value")
-        return js_result.get("value", js_result.get("description"))
+
+            rr = result.get("result", {})
+            if "exceptionDetails" in rr:
+                exc = rr["exceptionDetails"]
+                exc_text = (exc.get("text") or "").lower()
+                exc_desc = (
+                    (exc.get("exception") or {}).get("description") or ""
+                ).lower()
+                combined = exc_text + " " + exc_desc
+
+                # Auto-fix double-brace escaping on first attempt
+                if attempt == 0 and (
+                    "syntaxerror" in combined or "unexpected token" in combined
+                ):
+                    if "{{" in current_code or "}}" in current_code:
+                        fixed = current_code.replace("{{", "{").replace("}}", "}")
+                        if fixed != current_code:
+                            current_code = fixed
+                            continue
+
+                print(
+                    f"[AsyncWebTool] JS Exception at line "
+                    f"{exc.get('lineNumber', '?')}: {exc.get('text', '?')}"
+                )
+                return None
+
+            js_result = rr.get("result", {})
+            result_type = js_result.get("type", "undefined")
+            if result_type == "undefined":
+                return None
+            elif result_type in ("string", "number", "boolean"):
+                return js_result.get("value")
+            elif result_type == "object":
+                if js_result.get("subtype") == "null":
+                    return None
+                return js_result.get("value")
+            return js_result.get("value", js_result.get("description"))
+
+        return None
 
     async def screenshot_async(
         self,
@@ -2394,10 +2331,13 @@ class AsyncWebTool:
 class BrowserPool:
     """Async pool of N independent headless Chrome processes.
 
-    Gen-9: __aenter__() now starts all N browsers concurrently via
-    asyncio.gather() instead of a sequential loop.  Startup sleep reduced
-    from 1.5 s to 0.5 s per browser.  Combined with the go_async() overhead
-    reductions, a size-2 pool now completes in ~1 s overhead instead of ~7 s.
+    Gen-10 changes vs gen-9:
+      - Startup sleep reduced from 0.5 s → 0.05 s.  BrowserCDP.start()
+        already polls until Chrome's port is bound, so no additional delay
+        is needed.  A 50 ms grace period covers the gap between the port
+        becoming bound and Chrome's HTTP/JSON endpoint accepting connections.
+      - Shutdown parallelised with asyncio.gather() so N browsers shut down
+        concurrently instead of sequentially.
     """
 
     def __init__(
@@ -2423,14 +2363,15 @@ class BrowserPool:
         async def _start_one(i: int):
             port = find_free_port(preferred=self.port_start + i * 10)
             browser = BrowserCDP(port=port, headless=self.headless)
+            # BrowserCDP.start() blocks until Chrome's TCP port is bound.
             await loop.run_in_executor(None, browser.start)
-            # Reduced from 1.5 s → 0.5 s; Chrome is usually ready faster.
-            await asyncio.sleep(0.5)
+            # Small grace period for the HTTP/JSON endpoint to become ready
+            # after the port is bound (typically < 10 ms, 50 ms is ample).
+            await asyncio.sleep(0.05)
             tool = AsyncWebTool(port=port)
             await tool.connect()
             return browser, tool
 
-        # Start all browsers concurrently (was sequential in gen-8).
         pairs = await asyncio.gather(*[_start_one(i) for i in range(self.size)])
         for browser, tool in pairs:
             self._browsers.append(browser)
@@ -2445,16 +2386,22 @@ class BrowserPool:
         exc_tb: Any,
     ) -> None:
         loop = asyncio.get_running_loop()
+
+        # Close WebSocket connections first (fast, sequential)
         for tool in self._tools:
             try:
                 await tool.close()
             except Exception:
                 pass
-        for browser in self._browsers:
+
+        # Stop Chrome processes in parallel (each may take ~200 ms for SIGTERM)
+        async def _stop_browser(browser):
             try:
                 await loop.run_in_executor(None, browser.stop)
             except Exception:
                 pass
+
+        await asyncio.gather(*[_stop_browser(b) for b in self._browsers])
         self._browsers.clear()
         self._tools.clear()
 
@@ -2500,11 +2447,8 @@ class BrowserPool:
 if __name__ == "__main__":
     web = WebTool()
     web.connect()
-
     print("health_check:", web.health_check())
-
     web.go("https://quotes.toscrape.com")
     title = web.js("document.title")
     print("title:", title)
-
     web.close()

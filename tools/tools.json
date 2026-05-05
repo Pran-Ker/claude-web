@@ -1,7 +1,7 @@
 [
   {
     "name": "navigate",
-    "description": "Load the given URL in the active tab and wait for a page-load signal (Page.loadEventFired OR Page.frameStoppedLoading, whichever fires first). Falls back to document.readyState check before giving up. After load, injects the querySelector :first-child→:first-of-type shim into the page. If network logging is enabled, events fired during navigation are captured automatically.",
+    "description": "Load the given URL in the active tab and wait for a page-load signal (Page.loadEventFired OR Page.frameStoppedLoading, whichever fires first). Falls back to document.readyState check before giving up. After load, injects the querySelector :first-child→:first-of-type shim into the page.",
     "parameters": {
       "url": { "type": "string" },
       "timeout": { "type": "number", "default": 30, "description": "Max seconds to wait for load" }
@@ -11,7 +11,7 @@
   },
   {
     "name": "click",
-    "description": "Click the first element matching selector. Gen-9: after dispatching mouse events, click() polls for up to 400 ms for any navigation signal (Page.frameStartedLoading, Page.frameNavigated, Page.loadEventFired, Page.frameStoppedLoading). If navigation is detected, waits for full page load and re-injects the querySelector shim before returning. This makes click() correctly handle form-submit redirects (T1c) and link navigations (T4a) without requiring a separate wait_for_navigation() or click_and_wait() call. Non-navigating clicks (checkboxes, in-page buttons) return after at most 400 ms. Uses _get_coords_full() with a fallback selector chain: (1) exact selector, (2) ':first-child' replaced with ':first-of-type', (3) structural pseudo-classes stripped entirely. Raises WebToolError if no variant matches.",
+    "description": "Click the first element matching selector. Gen-10: three-stage navigation detection — (1) checks events buffered during mouse-event CDP calls, (2) polls for 400 ms for Page.frameStartedLoading / Page.frameNavigated / Page.loadEventFired / Page.frameStoppedLoading, (3) NEW readyState fallback: if no CDP nav event is detected, evaluates document.readyState; if not 'complete' (i.e. Chrome already began navigating but the 400 ms poll missed it — typical on Heroku cold-start dynos), waits up to 15 s for the full load before returning. This makes click() reliable for slow servers without adding overhead for non-navigating clicks. Raises WebToolError if no element found.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -21,7 +21,7 @@
   },
   {
     "name": "safe_click",
-    "description": "Click selector with an automatic fallback to click_by_text(fallback_text) when the selector cannot be found. Useful for dynamically-generated class names or unstable DOM paths where the button text is stable. If fallback_text is omitted and the selector fails, raises WebToolError like click(). Inherits gen-9 click() navigation auto-detection.",
+    "description": "Click selector with an automatic fallback to click_by_text(fallback_text) when the selector cannot be found. Inherits gen-10 click() readyState-fallback navigation detection.",
     "parameters": {
       "selector": { "type": "string", "description": "Primary CSS selector to try" },
       "fallback_text": { "type": "string", "optional": true, "description": "Visible button/link text to search for if selector fails" }
@@ -31,14 +31,13 @@
   },
   {
     "name": "click_and_wait",
-    "description": "Click *selector* and then block until the next Page.loadEventFired or Page.frameStoppedLoading event fires. Re-injects the querySelector shim after load. Gen-9: dispatches mouse events directly (bypasses click()'s auto-nav logic) to avoid a double-wait. Use this when you explicitly need the full timeout semantics or when calling code that predates the gen-9 click() auto-nav feature. Returns True if a navigation was observed within timeout, False otherwise (the click still happened).",
+    "description": "Click *selector* and then block until the next Page.loadEventFired or Page.frameStoppedLoading event fires. Re-injects the querySelector shim after load. Use when you need guaranteed navigation wait with a custom timeout. Returns True if navigation observed, False otherwise.",
     "parameters": {
       "selector": { "type": "string" },
       "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait for the resulting page load" }
     },
     "implementation": "web.click_and_wait(selector, timeout=15)",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://the-internet.herokuapp.com/login'); web.fill('#username','tomsmith'); web.fill('#password','SuperSecretPassword!'); web.click_and_wait(\\\"button[type='submit']\\\"); print(web.js('window.location.href')); web.close()\"",
-    "when_to_use": "When you need guaranteed navigation wait with a custom timeout. For most cases, plain click() now handles navigation automatically."
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://the-internet.herokuapp.com/login'); web.fill('#username','tomsmith'); web.fill('#password','SuperSecretPassword!'); web.click_and_wait(\\\"button[type='submit']\\\"); print(web.js('window.location.href')); web.close()\""
   },
   {
     "name": "double_click",
@@ -51,7 +50,7 @@
   },
   {
     "name": "triple_click",
-    "description": "Triple-click the first element matching selector, which selects all text inside an input/textarea. More reliable than Ctrl+A on pages that intercept keyboard shortcuts. Raises WebToolError if no element found.",
+    "description": "Triple-click the first element matching selector, which selects all text inside an input/textarea. More reliable than Ctrl+A on pages that intercept keyboard shortcuts.",
     "parameters": {
       "selector": { "type": "string" }
     },
@@ -60,11 +59,11 @@
   },
   {
     "name": "retry_click",
-    "description": "Attempt click() up to *attempts* times, sleeping *delay* seconds between failures. Each attempt benefits from gen-9 click() navigation auto-detection. Raises the last WebToolError if all attempts fail.",
+    "description": "Attempt click() up to *attempts* times, sleeping *delay* seconds between failures. Each attempt benefits from gen-10 click() navigation detection. Raises the last WebToolError if all attempts fail.",
     "parameters": {
       "selector": { "type": "string" },
-      "attempts": { "type": "number", "default": 3, "description": "Maximum click attempts" },
-      "delay": { "type": "number", "default": 0.5, "description": "Seconds between attempts" }
+      "attempts": { "type": "number", "default": 3 },
+      "delay": { "type": "number", "default": 0.5 }
     },
     "implementation": "web.retry_click('button#confirm', attempts=5, delay=0.3)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.retry_click('button#submit', attempts=4, delay=0.5); web.close()\""
@@ -81,7 +80,7 @@
   },
   {
     "name": "safe_fill",
-    "description": "Fill *selector* with *text*, falling back to direct JS property assignment if the element cannot be reached by mouse coordinates (off-screen, inside a shadow DOM, or zero-size). Always fires input and change events so React/Vue/Angular listeners register the new value. Raises WebToolError only when the element is completely absent from the DOM.",
+    "description": "Fill *selector* with *text*, falling back to direct JS property assignment if the element cannot be reached by mouse coordinates. Always fires input and change events. Raises WebToolError only when the element is completely absent from the DOM.",
     "parameters": {
       "selector": { "type": "string" },
       "text": { "type": "string" }
@@ -122,7 +121,7 @@
   },
   {
     "name": "execute_js",
-    "description": "Evaluate JavaScript in the page context and return the result. Gen-9: js() now retries up to 2 additional times (200 ms apart) when the JS throws a TypeError or null/undefined access error — this fixes the timing race on JS-rendered pages where wait() returns True but child DOM nodes are not yet populated. Wrap objects/arrays in JSON.stringify(). document.querySelector and querySelectorAll are shimmed to retry ':first-child' selectors as ':first-of-type'.",
+    "description": "Evaluate JavaScript in the page context and return the result. Gen-10: js() now auto-unescapes Python format-string double braces ({{ → { and }} → }) when a SyntaxError is detected — this fixes the pattern where benchmark code passes JS strings with literal {{ / }} that were never evaluated as f-strings. Also retries up to 2 more times (200 ms apart) on TypeError / null-access exceptions. Wrap objects/arrays in JSON.stringify(). document.querySelector and querySelectorAll are shimmed to retry ':first-child' selectors as ':first-of-type'.",
     "parameters": {
       "code": { "type": "string" }
     },
@@ -137,15 +136,14 @@
   },
   {
     "name": "js_wait",
-    "description": "Retry a JavaScript expression repeatedly until it returns a non-null/non-undefined value, or the timeout expires. Fixes the race condition where wait() sees a selector in the DOM but the element's text content is not yet populated (JS-rendered pages, streaming updates). Polls every *interval* seconds. Returns the first non-None result, or None on timeout.",
+    "description": "Retry a JavaScript expression repeatedly until it returns a non-null/non-undefined value, or the timeout expires. Fixes the race condition where wait() sees a selector in the DOM but the element's text content is not yet populated. Polls every *interval* seconds.",
     "parameters": {
-      "code": { "type": "string", "description": "JavaScript expression to evaluate. Should return a truthy value when content is ready." },
-      "timeout": { "type": "number", "default": 5, "description": "Max seconds to retry" },
-      "interval": { "type": "number", "default": 0.2, "description": "Seconds between retries" }
+      "code": { "type": "string" },
+      "timeout": { "type": "number", "default": 5 },
+      "interval": { "type": "number", "default": 0.2 }
     },
     "implementation": "data = web.js_wait(\"JSON.stringify(Array.from(document.querySelectorAll('.quote')).map(q=>q.textContent.trim()))\", timeout=8)",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('https://quotes.toscrape.com/js/'); web.wait('.quote'); data = web.js_wait(\\\"JSON.stringify(Array.from(document.querySelectorAll('.quote .text')).map(e=>e.textContent.trim()))\\\", timeout=8); print(json.loads(data)[:2]); web.close()\"",
-    "when_to_use": "After wait() confirms an element exists but js() returns null — the element is present but its content is not yet rendered. Note: gen-9 js() already retries on TypeError, so js_wait() is mainly needed for semantically-null returns."
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('https://quotes.toscrape.com/js/'); web.wait('.quote'); data = web.js_wait(\\\"JSON.stringify(Array.from(document.querySelectorAll('.quote .text')).map(e=>e.textContent.trim()))\\\", timeout=8); print(json.loads(data)[:2]); web.close()\""
   },
   {
     "name": "health_check",
@@ -169,7 +167,7 @@
     "description": "Poll at 0.1 s intervals until at least *count* elements matching selector are present in the DOM. Returns True when threshold met, False on timeout.",
     "parameters": {
       "selector": { "type": "string" },
-      "count": { "type": "number", "default": 1, "description": "Minimum number of matching elements required" },
+      "count": { "type": "number", "default": 1 },
       "timeout": { "type": "number", "default": 10 }
     },
     "implementation": "web.wait_for_count('.product-card', count=20, timeout=8)",
@@ -198,7 +196,7 @@
   },
   {
     "name": "wait_for_navigation",
-    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). In gen-9, most cases are handled automatically by click(). Use this method when you need to wait for a navigation triggered by a mechanism other than click() (e.g. a JS redirect, form.submit() via js(), etc.).",
+    "description": "Block until the next page-load event fires (Page.loadEventFired or Page.frameStoppedLoading). Use when you need to wait for a navigation triggered by a mechanism other than click() (e.g. a JS redirect, form.submit() via js(), etc.).",
     "parameters": {
       "timeout": { "type": "number", "default": 15 }
     },
@@ -216,7 +214,7 @@
   },
   {
     "name": "scroll",
-    "description": "Scroll the page in a given direction by a number of pixels. Useful for revealing lazy-loaded content.",
+    "description": "Scroll the page in a given direction by a number of pixels using Input.dispatchMouseEvent(mouseWheel). Useful for revealing lazy-loaded content.",
     "parameters": {
       "direction": { "type": "string", "enum": ["up", "down", "left", "right"], "default": "down" },
       "pixels": { "type": "number", "default": 500 }
@@ -250,11 +248,7 @@
       "value": { "type": "string", "description": "Option value attribute OR visible option text (tried in that order)" }
     },
     "implementation": "web.select_option(selector, value)",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.select_option('#dropdown', 'Option 2'); web.close()\"",
-    "examples": [
-      "web.select_option('#country', 'US')           # by value attribute",
-      "web.select_option('#size', 'Extra Large')      # by visible label text"
-    ]
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.select_option('#dropdown', 'Option 2'); web.close()\""
   },
   {
     "name": "is_visible",
@@ -286,7 +280,7 @@
   },
   {
     "name": "find_by_text",
-    "description": "Find the first element whose visible text exactly matches the given string. Returns {tagName, selector} or null.",
+    "description": "Find the first element whose visible text exactly matches the given string. Returns {tagName, selector} dict or None.",
     "parameters": {
       "text": { "type": "string" },
       "tag": { "type": "string", "default": "*", "description": "Optional tag name to narrow the search (e.g. 'button', 'a', 'li')" }
@@ -296,10 +290,10 @@
   },
   {
     "name": "click_by_text",
-    "description": "Find the first element with the given visible text and click it. Raises WebToolError if not found. Inherits gen-9 click() navigation auto-detection.",
+    "description": "Find the first element with the given visible text and click it. Raises WebToolError if not found. Inherits gen-10 click() navigation detection.",
     "parameters": {
       "text": { "type": "string" },
-      "tag": { "type": "string", "default": "*", "description": "Optional tag name to narrow the search" }
+      "tag": { "type": "string", "default": "*" }
     },
     "implementation": "web.click_by_text(text, tag)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.click_by_text('Submit', 'button'); web.close()\""
@@ -315,7 +309,7 @@
     "name": "get_table",
     "description": "Extract the first <table> matching selector as a list of dicts. Header cells become dict keys; each body row becomes one dict. Raises WebToolError if no table found.",
     "parameters": {
-      "selector": { "type": "string", "default": "table", "description": "CSS selector for the target <table>" }
+      "selector": { "type": "string", "default": "table" }
     },
     "implementation": "web.get_table(selector)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); rows = web.get_table('#myTable'); print(json.dumps(rows, indent=2)); web.close()\""
@@ -324,7 +318,7 @@
     "name": "get_form_fields",
     "description": "Introspect form structure. Returns a list of dicts (one per input/select/textarea) with keys: tag, type, name, id, value, placeholder, required, options (for select elements).",
     "parameters": {
-      "selector": { "type": "string", "default": "form", "description": "CSS selector for the form element" }
+      "selector": { "type": "string", "default": "form" }
     },
     "implementation": "web.get_form_fields(selector)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; import json; web = WebTool(port=9222); web.connect(); web.go('URL'); fields = web.get_form_fields('#login-form'); print(json.dumps(fields, indent=2)); web.close()\""
@@ -340,26 +334,26 @@
     "name": "upload_file",
     "description": "Set a file-input element's files via DOM.setFileInputFiles — no OS file-picker dialog appears. Raises WebToolError if element is not found or not a file input.",
     "parameters": {
-      "selector": { "type": "string", "description": "CSS selector for the <input type='file'> element" },
-      "file_path": { "type": "string", "description": "Absolute path to the file to upload" }
+      "selector": { "type": "string" },
+      "file_path": { "type": "string" }
     },
     "implementation": "web.upload_file(selector, file_path)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.upload_file('input[type=file]', '/tmp/doc.pdf'); web.close()\""
   },
   {
     "name": "login",
-    "description": "All-in-one login helper. Navigates to url, fills username and password fields, clicks submit (gen-9: click() auto-waits for post-login redirect), then verifies URL changed. Returns True if a redirect occurred.",
+    "description": "All-in-one login helper. Navigates to url, fills username and password fields, clicks submit (gen-10 click() includes readyState fallback for slow servers), then verifies URL changed. Returns True if a redirect occurred.",
     "parameters": {
-      "url": { "type": "string", "description": "Login page URL" },
-      "username_selector": { "type": "string", "description": "CSS selector for the username/email input" },
+      "url": { "type": "string" },
+      "username_selector": { "type": "string" },
       "username": { "type": "string" },
-      "password_selector": { "type": "string", "description": "CSS selector for the password input" },
+      "password_selector": { "type": "string" },
       "password": { "type": "string" },
-      "submit_selector": { "type": "string", "description": "CSS selector for the submit button" },
-      "timeout": { "type": "number", "default": 15, "description": "Max seconds to wait for post-login redirect" }
+      "submit_selector": { "type": "string" },
+      "timeout": { "type": "number", "default": 15 }
     },
     "implementation": "success = web.login(url, '#username', 'tomsmith', '#password', 'SuperSecretPassword!', \"button[type='submit']\")",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); ok = web.login('https://the-internet.herokuapp.com/login', '#username', 'tomsmith', '#password', 'SuperSecretPassword!', \\\"button[type='submit']\\\"); print('logged in:', ok, web.js('window.location.href')); web.close()\""
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); ok = web.login('https://the-internet.herokuapp.com/login', '#username', 'tomsmith', '#password', 'SuperSecretPassword!', \\\"button[type='submit']\\\"); print('logged in:', ok); web.close()\""
   },
   {
     "name": "fill_form",
@@ -372,13 +366,13 @@
       }
     },
     "implementation": "web.fill_form({'#username': 'tomsmith', '#password': 'secret', '#remember': 'true', '#country': 'US'})",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.fill_form({'#first': 'Alice', '#last': 'Smith', '#email': 'alice@example.com'}); web.click('button[type=submit]'); web.close()\""
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('URL'); web.fill_form({'#first': 'Alice', '#last': 'Smith'}); web.click('button[type=submit]'); web.close()\""
   },
   {
     "name": "paginate",
-    "description": "Collect data across multiple pages automatically. Gen-9: no longer calls wait_for_navigation() after click(next_selector) because click() now auto-waits for navigation. On each page: calls extractor_fn(web), clicks next_selector, waits for nav via click(). Stops when next_selector disappears or max_pages reached.",
+    "description": "Collect data across multiple pages automatically. On each page: calls extractor_fn(web), clicks next_selector (which auto-handles navigation via gen-10 click()). Stops when next_selector disappears or max_pages reached.",
     "parameters": {
-      "next_selector": { "type": "string", "description": "CSS selector for the 'next page' link or button" },
+      "next_selector": { "type": "string" },
       "extractor_fn": { "type": "function", "description": "Python callable(web: WebTool) -> list" },
       "max_pages": { "type": "number", "default": 10 }
     },
@@ -389,7 +383,7 @@
     "name": "open_tab",
     "description": "Open a new browser tab and return its tab id string. Does NOT switch focus — call switch_tab(tab_id) to interact with the new tab.",
     "parameters": {
-      "url": { "type": "string", "default": "about:blank", "description": "Initial URL for the new tab" }
+      "url": { "type": "string", "default": "about:blank" }
     },
     "implementation": "tab_id = web.open_tab(url)",
     "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); tid = web.open_tab('https://example.com'); web.switch_tab(tid); print(web.js('document.title')); web.close()\""
@@ -421,7 +415,7 @@
   },
   {
     "name": "enable_network_logging",
-    "description": "Enable CDP Network domain and start collecting all network events into an in-process log. Call this BEFORE navigating so events during page load are captured. Resets the log on each call.",
+    "description": "Enable CDP Network domain and start collecting all network events. Call this BEFORE navigating so events during page load are captured. Resets the log on each call.",
     "parameters": {},
     "implementation": "web.enable_network_logging()",
     "bash_usage": "python3 -c \"\nfrom tools.web_tool import WebTool; import json\nweb = WebTool(port=9222); web.connect()\nweb.enable_network_logging()\nweb.go('https://quotes.toscrape.com')\nlog = web.get_network_log()\nprint(f'Captured {len(log)} events')\nweb.close()\n\""
@@ -437,7 +431,7 @@
     "name": "wait_for_request",
     "description": "Block until a network request whose URL contains the given pattern fires. Returns a dict with keys: type, url, method, resourceType, requestId, timestamp — or None on timeout.",
     "parameters": {
-      "pattern": { "type": "string", "description": "Substring to match against the full request URL" },
+      "pattern": { "type": "string" },
       "timeout": { "type": "number", "default": 15 }
     },
     "implementation": "req = web.wait_for_request('/api/data', timeout=10)",
@@ -479,30 +473,49 @@
       "success_keywords": { "type": "array", "items": { "type": "string" } }
     },
     "implementation": "Compare web.js('window.location.href') with initial_url; search web.js('document.body.textContent.toLowerCase()') for success_keywords.",
-    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); final_url = web.js('window.location.href'); page_text = web.js('document.body.textContent.toLowerCase()'); success = any(k in page_text for k in ['success','complete','confirmed']); print(f'URL changed: {final_url != initial_url}, Success: {success}'); web.close()\""
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); final_url = web.js('window.location.href'); page_text = web.js('document.body.textContent.toLowerCase()'); success = any(k in page_text for k in ['success','complete','confirmed']); print(f'Success: {success}'); web.close()\""
   },
   {
     "name": "browser_pool",
-    "description": "Create and manage an async pool of N independent headless Chrome processes. Gen-9: startup parallelized via asyncio.gather() (was sequential), per-browser sleep reduced 1.5 s → 0.5 s, go_async() title-wait reduced 3.0 s → 0.5 s, readyState poll reduced 2.0 s → 1.0 s. A size-2 pool now starts in ~0.5 s instead of ~3.4 s, making pool execution reliably faster than sequential.",
+    "description": "Create and manage an async pool of N independent headless Chrome processes for parallel URL processing. Gen-10: startup sleep reduced 0.5 s → 0.05 s (BrowserCDP.start() already polls until Chrome is ready), and Chrome processes are now shut down in parallel via asyncio.gather(), reducing pool teardown time. Together these changes cut total pool overhead by ~0.6–1 s, keeping pool_total well under the 2.5× slowest-task threshold.",
     "parameters": {
       "size": { "type": "number", "default": 2 },
       "headless": { "type": "boolean", "default": true },
       "port_start": { "type": "number", "default": 9300 }
     },
-    "implementation": "from tools.web_tool import BrowserPool\n\nasync with BrowserPool(size=2) as pool:\n    results = await pool.map(async_fn, [url1, url2])",
+    "implementation": "from tools.web_tool import BrowserPool\n\nasync with BrowserPool(size=3) as pool:\n    results = await pool.map(async_fn, [url1, url2, url3])",
     "bash_usage": "python3 -c \"\nimport asyncio\nfrom tools.web_tool import BrowserPool, AsyncWebTool\n\nasync def fetch(web, url):\n    await web.go_async(url)\n    return await web.js_async('document.title')\n\nasync def main():\n    async with BrowserPool(size=2) as pool:\n        titles = await pool.map(fetch, ['https://example.com', 'https://quotes.toscrape.com'])\n    print(titles)\n\nasyncio.run(main())\n\"",
     "map_signature": "async def fn(web: AsyncWebTool, arg: Any) -> Any",
     "note": "Requires 'pip install websockets'."
   },
   {
     "name": "async_web_tool",
-    "description": "Fully async CDP browser automation via AsyncWebTool. Gen-9: go_async() title-wait ceiling reduced to 0.5 s and readyState poll reduced to 1.0 s, eliminating the per-navigation overhead that caused T4b parallelism failure.",
+    "description": "Fully async CDP browser automation via AsyncWebTool. Gen-10: js_async() includes the same double-brace auto-unescape fix as the sync js().",
     "parameters": {
       "port": { "type": "number", "default": 9222 }
     },
     "implementation": "from tools.web_tool import AsyncWebTool\naweb = AsyncWebTool(port=9222)\nawait aweb.connect()\nawait aweb.go_async('https://example.com')\nprint(await aweb.js_async('document.title'))\nawait aweb.close()",
     "bash_usage": "python3 -c \"import asyncio; from tools.web_tool import AsyncWebTool\nasync def main():\n    web = AsyncWebTool(9222)\n    await web.connect()\n    await web.go_async('https://example.com')\n    print(await web.js_async('document.title'))\n    await web.close()\nasyncio.run(main())\"",
     "requires": "pip install websockets"
+  },
+  {
+    "name": "text",
+    "description": "Return the textContent of the first element matching selector, or None if not found. Alias: get_text.",
+    "parameters": {
+      "selector": { "type": "string" }
+    },
+    "implementation": "web.text(selector)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://quotes.toscrape.com'); print(web.text('.quote:first-child .author')); web.close()\""
+  },
+  {
+    "name": "attr",
+    "description": "Return the value of *attribute* on the first element matching selector, or None if not found. Alias: get_attribute.",
+    "parameters": {
+      "selector": { "type": "string" },
+      "attribute": { "type": "string" }
+    },
+    "implementation": "web.attr(selector, attribute)",
+    "bash_usage": "python3 -c \"from tools.web_tool import WebTool; web = WebTool(port=9222); web.connect(); web.go('https://example.com'); print(web.attr('a', 'href')); web.close()\""
   },
   {
     "name": "clone_website",

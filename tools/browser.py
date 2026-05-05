@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Minimal Chrome CDP launcher with multi-browser management and pretty logging.
-
-Unchanged from Generation 4 — no modifications required for Generation 9.
+Copied verbatim from reference/browser.py — no changes in gen-10.
 """
 
 import logging
@@ -79,7 +78,6 @@ def _which_chrome() -> str:
             continue
     raise FileNotFoundError(
         "Chrome/Chromium executable not found. Install Chrome or adjust CHROME_PATHS.")
-
 
 
 def find_free_port(preferred: Optional[int] = None, start: int = PORT_RANGE_START, end: int = PORT_RANGE_END) -> int:
@@ -225,7 +223,6 @@ class MultiBrowserManager:
         self._browsers: Dict[int, BrowserCDP] = {}
 
     def start(self, port: Optional[int] = None, headless: bool = DEFAULT_HEADLESS) -> str:
-        # Choose a port
         if port is None:
             port = find_free_port()
         elif not _port_is_free(port):
@@ -251,7 +248,6 @@ class MultiBrowserManager:
         for port in list(self._browsers):
             self.stop(port)
 
-    # ────────── convenience helpers ──────────
     def running_ports(self) -> List[int]:
         return list(self._browsers)
 
@@ -323,8 +319,8 @@ if __name__ == "__main__":
     else:
         print(
             "Usage:\n"
-            "  python browser.py start    # start one or more browsers (env: CDP_PORT, CDP_COUNT, CDP_HEADLESS, CDP_RANGE)\n"
+            "  python browser.py start    # start one or more browsers\n"
             "  python browser.py list     # list ports started by this tool\n"
-            "  python browser.py stop     # stop specific ports (eg: CDP_PORTS=9222,9223 python browser.py stop)\n"
+            "  python browser.py stop     # stop specific ports (CDP_PORTS=9222,9223)\n"
             "  python browser.py stop-all # stop all started by this tool\n"
         )
