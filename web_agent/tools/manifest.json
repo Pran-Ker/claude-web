@@ -1,0 +1,47 @@
+{
+  "$comment": "Agent contract for web_agent. Two logical tools, each with an `operation` discriminator. The CLI surface (`python -m web_agent ...`) is the canonical invocation; this file documents the operation grammar.",
+  "tools": [
+    {
+      "name": "Inspector",
+      "purpose": "Capture, query, read, and act on DOM elements via stable handles. Snapshot data lives on disk so it never floods the agent's context — the agent receives a receipt and queries against the snapshot id.",
+      "operations": {
+        "inspect": {
+          "cli": "python -m web_agent inspect",
+          "returns": "{inspect_id, url, title, total_elements, top_roles, hint}",
+          "notes": "Run after every navigation or DOM-mutating action."
+        },
+        "query": {
+          "cli": "python -m web_agent query <inspect_id> [--role R] [--name TEXT] [--text TEXT] [--tag T] [--scope-selector S] [--all-visibility] [--limit N]",
+          "returns": "{matches: [{handle, role, name, tag, visible, enabled, bbox, value}], shown, total, hint?}",
+          "notes": "Default limit is 20. Truncated results include a hint on how to narrow."
+        },
+        "read": {
+          "cli": "python -m web_agent read <inspect_id> <handle>",
+          "returns": "{element: {... full record incl. attrs, selector, backend_node_id ...}}"
+        },
+        "act": {
+          "cli": "python -m web_agent act <inspect_id> <handle> <click|fill|focus|scroll_into_view> [--text TEXT]",
+          "returns": "{ok, action, handle, ...}",
+          "errors": "stale_handle when the snapshot is out of date — re-run inspect."
+        }
+      }
+    },
+    {
+      "name": "Browser",
+      "purpose": "Page-wide escape hatches that don't need a handle.",
+      "operations": {
+        "navigate":   {"cli": "python -m web_agent navigate <url> [--wait SECONDS]"},
+        "screenshot": {"cli": "python -m web_agent screenshot <path> [--quality N]"},
+        "js":         {"cli": "python -m web_agent js <code>"},
+        "key":        {"cli": "python -m web_agent key <Tab|Enter|...>"},
+        "page-info":  {"cli": "python -m web_agent page-info"},
+        "snapshots":  {"cli": "python -m web_agent snapshots"}
+      }
+    }
+  ],
+  "global_flags": {
+    "--port": "CDP port (default 9222). Start Chrome via `python tools/browser.py start`.",
+    "--snapshots-dir": "Where snapshot JSON files live (default .snapshots)."
+  },
+  "output_contract": "Every command writes a single JSON object to stdout. Errors set `ok: false` and exit non-zero, with `kind`, `error`, and `hint` fields the agent should read."
+}
