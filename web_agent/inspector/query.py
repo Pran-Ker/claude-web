@@ -73,7 +73,7 @@ def query_snapshot(
     if total > limit:
         out["hint"] = (
             f"{total - limit} more matches not shown. Narrow with "
-            "name_contains=, role=, tag=, or scope_selector=, "
+            "--name, --role, --tag, or --scope-selector, "
             "or raise --limit."
         )
     elif total == 0:

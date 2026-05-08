@@ -100,8 +100,10 @@ class CDPClient:
         if "exceptionDetails" in result:
             ex = result["exceptionDetails"]
             text = ex.get("exception", {}).get("description") or ex.get("text") or "JS error"
+            line = ex.get("lineNumber")
+            where = f" at line {line + 1}" if isinstance(line, int) else ""
             raise JSExecutionError(
-                f"JS exception at line {ex.get('lineNumber', '?')}: {text}",
+                f"JS exception{where}: {text}",
                 hint="Check the expression syntax; ensure referenced selectors exist.",
             )
         obj = result.get("result", {})
