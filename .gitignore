@@ -209,6 +209,13 @@ __marimo__/
 # Web automation artifacts
 tasks/
 screenshots/
+.snapshots/
+.crawls/
+
+# Loose test screenshots at repo root
+/test_*.jpg
+/sse_test_*.jpg
+.DS_Store
 
 # Clone directory folders
 clone/*/
