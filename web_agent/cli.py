@@ -35,6 +35,8 @@ from .inspector import (
 from .inspector.query import read_handle
 from .inspector.snapshot import receipt
 from .primitives import dom
+from .scraper.fetch import fetch as scraper_fetch
+from .scraper.jobs import JobStore
 from .transport import CDPClient
 
 
@@ -124,6 +126,150 @@ def cmd_snapshots(args) -> None:
     _emit({"ok": True, "snapshots": ids, "latest": _store(args).latest()})
 
 
+# -- scraper subcommands ----------------------------------------------------
+
+
+def cmd_fetch(args) -> None:
+    from .scraper.fetch import DEFAULT_USER_AGENT
+    ua = args.user_agent if args.user_agent is not None else DEFAULT_USER_AGENT
+    result = scraper_fetch(
+        args.url,
+        engine=args.engine,
+        port=args.port,
+        timeout=args.timeout,
+        user_agent=ua,
+        include_html=args.include_html,
+        screenshot_path=args.screenshot,
+    )
+    if args.output_dir:
+        out = Path(args.output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        from .scraper.jobs import _slugify
+        path = out / f"{_slugify(result.get('url') or args.url)}.md"
+        path.write_text(result.get("markdown") or "")
+        result["markdown_path"] = str(path)
+    if args.no_links:
+        result["links"] = []
+    if args.markdown_only:
+        _emit({
+            "ok": True,
+            "url": result.get("url"),
+            "engine": result.get("engine"),
+            "title": result.get("title"),
+            "attempts": result.get("attempts", []),
+            "markdown": result.get("markdown", ""),
+            "warning": result.get("warning"),
+        })
+    else:
+        _emit({"ok": True, **result})
+
+
+def _job_store(args) -> JobStore:
+    return JobStore(args.crawls_dir)
+
+
+def cmd_crawl(args) -> None:
+    import subprocess
+    import sys as _sys
+
+    if args.delay < 0:
+        raise InvalidArguments(
+            f"--delay must be non-negative (got {args.delay}).",
+            hint="Use 0 to disable, or a positive number of seconds.",
+        )
+    if args.timeout <= 0:
+        raise InvalidArguments(
+            f"--timeout must be positive (got {args.timeout}).",
+            hint="Pass a positive number of seconds.",
+        )
+    spec = {
+        "url": args.url,
+        "limit": args.limit,
+        "depth": args.depth,
+        "external": args.external,
+        "engine": args.engine,
+        "respect_robots": not args.no_robots,
+        "port": args.port,
+        "delay": args.delay,
+        "timeout": args.timeout,
+        "user_agent": args.user_agent,
+        "use_sitemap": not args.no_sitemap,
+    }
+    store = _job_store(args)
+    jid = store.create(spec)
+
+    # Spawn detached worker. stdout/stderr go to a log inside the job dir
+    # so they don't pollute the parent's JSON output.
+    log = open(store.job_dir(jid) / "worker.log", "wb")
+    proc = subprocess.Popen(
+        [_sys.executable, "-m", "web_agent.scraper.worker", jid,
+         "--crawls-dir", str(args.crawls_dir)],
+        stdout=log, stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+    store.update_status(jid, worker_pid=proc.pid)
+    dir_flag = f" --crawls-dir {args.crawls_dir}" if args.crawls_dir != ".crawls" else ""
+    _emit({
+        "ok": True,
+        "job_id": jid,
+        "spec": spec,
+        "status_cmd": f"python3 -m web_agent{dir_flag} crawl-status {jid}",
+        "results_cmd": f"python3 -m web_agent{dir_flag} crawl-results {jid}",
+        "cancel_cmd": f"python3 -m web_agent{dir_flag} crawl-cancel {jid}",
+    })
+
+
+def cmd_crawl_status(args) -> None:
+    store = _job_store(args)
+    spec = store.read_spec(args.job_id)
+    status = store.reconcile(args.job_id)
+    _emit({"ok": True, "job_id": args.job_id, "spec": spec, "status": status})
+
+
+def cmd_crawl_cancel(args) -> None:
+    store = _job_store(args)
+    store.request_cancel(args.job_id)  # raises JobNotRunning if already terminal
+    _emit({"ok": True, "job_id": args.job_id, "cancel_requested": True,
+           "hint": "The worker checks for cancellation between pages; allow a few seconds."})
+
+
+def cmd_crawl_results(args) -> None:
+    store = _job_store(args)
+    pages = store.list_pages(args.job_id)
+    status = store.read_status(args.job_id)
+    _emit({
+        "ok": True,
+        "job_id": args.job_id,
+        "state": status.get("state"),
+        "page_count": len(pages),
+        "pages": pages[: args.limit],
+        "shown": min(len(pages), args.limit),
+        "total": len(pages),
+        "hint": (f"{len(pages) - args.limit} more pages — raise --limit to see them."
+                 if len(pages) > args.limit else None),
+    })
+
+
+def cmd_crawl_list(args) -> None:
+    store = _job_store(args)
+    jobs = store.list_jobs()
+    summaries = []
+    for jid in jobs:
+        try:
+            s = store.read_status(jid)
+            spec = store.read_spec(jid)
+            summaries.append({
+                "job_id": jid,
+                "state": s.get("state"),
+                "url": spec.get("url"),
+                "pages_done": s.get("pages_done"),
+            })
+        except Exception:
+            continue
+    _emit({"ok": True, "jobs": summaries, "total": len(summaries)})
+
+
 # -- argparse wiring --------------------------------------------------------
 
 
@@ -137,6 +283,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--snapshots-dir",
         default=".snapshots",
         help="Directory for snapshot store (default .snapshots)",
+    )
+    p.add_argument(
+        "--crawls-dir",
+        default=".crawls",
+        help="Directory for crawl-job store (default .crawls)",
     )
 
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -191,6 +342,58 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("snapshots", help="List saved snapshot ids")
     sp.set_defaults(fn=cmd_snapshots)
+
+    # ---- scraper subcommands ----
+    sp = sub.add_parser("fetch", help="URL → clean markdown (Jina/HTTP/CDP ladder)")
+    sp.add_argument("url")
+    sp.add_argument("--engine", choices=["auto", "jina", "http", "cdp"], default="auto")
+    sp.add_argument("--markdown-only", action="store_true",
+                    help="Return only {url, engine, title, markdown, attempts}")
+    sp.add_argument("--no-links", action="store_true", help="Empty the links list in output")
+    sp.add_argument("--output-dir", help="If set, write markdown to <dir>/<slug>.md and add markdown_path to result")
+    sp.add_argument("--timeout", type=float, default=20.0, help="Per-request timeout in seconds")
+    sp.add_argument("--user-agent", default=None,
+                    help="Override the User-Agent header (http engine only)")
+    sp.add_argument("--include-html", action="store_true",
+                    help="Co-output the raw HTML alongside markdown")
+    sp.add_argument("--screenshot", metavar="PATH",
+                    help="Save a JPEG screenshot to PATH (requires --engine cdp or auto)")
+    sp.set_defaults(fn=cmd_fetch)
+
+    sp = sub.add_parser("crawl", help="BFS crawl a site (returns job_id immediately)")
+    sp.add_argument("url")
+    sp.add_argument("--limit", type=int, default=25, help="Max pages (default 25)")
+    sp.add_argument("--depth", type=int, default=2, help="Max link depth (default 2)")
+    sp.add_argument("--engine", choices=["auto", "jina", "http", "cdp"], default="auto")
+    sp.add_argument("--external", action="store_true",
+                    help="Follow off-origin links (default same-origin only)")
+    sp.add_argument("--no-robots", action="store_true",
+                    help="Ignore robots.txt (default: respect)")
+    sp.add_argument("--no-sitemap", action="store_true",
+                    help="Skip sitemap.xml seeding (default: use it)")
+    sp.add_argument("--delay", type=float, default=0.5,
+                    help="Seconds between page fetches (default 0.5; 0 to disable)")
+    sp.add_argument("--timeout", type=float, default=20.0,
+                    help="Per-page fetch timeout in seconds (default 20)")
+    sp.add_argument("--user-agent", default=None,
+                    help="Override the User-Agent (used by both fetch and robots check)")
+    sp.set_defaults(fn=cmd_crawl)
+
+    sp = sub.add_parser("crawl-status", help="Poll the status of a crawl job")
+    sp.add_argument("job_id")
+    sp.set_defaults(fn=cmd_crawl_status)
+
+    sp = sub.add_parser("crawl-cancel", help="Request cancellation of a running crawl")
+    sp.add_argument("job_id")
+    sp.set_defaults(fn=cmd_crawl_cancel)
+
+    sp = sub.add_parser("crawl-results", help="List the pages saved by a crawl job")
+    sp.add_argument("job_id")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.set_defaults(fn=cmd_crawl_results)
+
+    sp = sub.add_parser("crawl-list", help="List all crawl jobs")
+    sp.set_defaults(fn=cmd_crawl_list)
 
     return p
 
