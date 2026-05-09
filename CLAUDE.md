@@ -1,9 +1,15 @@
 # CLAUDE.md — Web Agent Automation Guide
 
-> **The agent surface is `python3 -m web_agent ...`.** It is a single CLI that
-> exposes two logical tools (Inspector + Browser) via subcommands, and prints
-> one JSON object per invocation. See `web_agent/tools/AGENTS.md` for the full
-> playbook and `web_agent/tools/manifest.json` for the contract.
+> **The agent surface is `.venv/bin/python -m web_agent ...`** (all commands
+> below use it). One CLI exposes three logical tools — Inspector, Browser,
+> Scraper — via subcommands, and prints one JSON object per invocation. See
+> `web_agent/tools/AGENTS.md` for the full playbook and
+> `web_agent/tools/manifest.json` for the contract.
+>
+> **First-time setup**: from the repo root, run `uv sync` once to create
+> `.venv/` and install deps. After that, always invoke via `.venv/bin/python`
+> — system `python3` won't have `trafilatura`/`lxml`/`httpx` and scraper
+> commands will fail with a "Scraper dependencies not installed" error.
 >
 > The legacy `tools/web_tool.py` + `tools/tools.json` surface still exists for
 > backward compatibility, but new work goes through `web_agent`.
@@ -14,18 +20,18 @@
 
 ```bash
 # 1. Land on the page
-python3 -m web_agent navigate "https://example.com/checkout"
+.venv/bin/python -m web_agent navigate "https://example.com/checkout"
 
 # 2. Snapshot — receipt comes back; full data goes to .snapshots/
-python3 -m web_agent inspect
+.venv/bin/python -m web_agent inspect
 # → {"inspect_id": "s7", "total_elements": 142, "top_roles": {...}, "hint": "..."}
 
 # 3. Query against the snapshot id (NOT the live page)
-python3 -m web_agent query s7 --role button --name submit
+.venv/bin/python -m web_agent query s7 --role button --name submit
 # → {"matches": [{"handle": "button:submit-order", ...}], "total": 1}
 
 # 4. Act using the readable handle
-python3 -m web_agent act s7 button:submit-order click
+.venv/bin/python -m web_agent act s7 button:submit-order click
 ```
 
 ## Subcommand reference
@@ -69,22 +75,22 @@ running browser for most pages, and offloads bulk content to disk.
 
 ```bash
 # Default: auto engine (Jina → http → CDP) with intelligent escalation
-python3 -m web_agent fetch https://example.com
+.venv/bin/python -m web_agent fetch https://example.com
 
 # Force one engine
-python3 -m web_agent fetch https://example.com --engine http     # fast, no JS
-python3 -m web_agent fetch https://example.com --engine cdp      # full JS render
-python3 -m web_agent fetch https://example.com --engine jina     # hosted reader
+.venv/bin/python -m web_agent fetch https://example.com --engine http     # fast, no JS
+.venv/bin/python -m web_agent fetch https://example.com --engine cdp      # full JS render
+.venv/bin/python -m web_agent fetch https://example.com --engine jina     # hosted reader
 
 # Trim noise / capture extras
-python3 -m web_agent fetch <url> --markdown-only                 # just {url, engine, title, markdown}
-python3 -m web_agent fetch <url> --no-links                      # empty the links list
-python3 -m web_agent fetch <url> --include-html                  # add raw HTML to result
-python3 -m web_agent fetch <url> --output-dir out/               # write markdown to disk
-python3 -m web_agent fetch <url> --engine cdp --screenshot shot.jpg
+.venv/bin/python -m web_agent fetch <url> --markdown-only                 # just {url, engine, title, markdown}
+.venv/bin/python -m web_agent fetch <url> --no-links                      # empty the links list
+.venv/bin/python -m web_agent fetch <url> --include-html                  # add raw HTML to result
+.venv/bin/python -m web_agent fetch <url> --output-dir out/               # write markdown to disk
+.venv/bin/python -m web_agent fetch <url> --engine cdp --screenshot shot.jpg
 
 # Tuning
-python3 -m web_agent fetch <url> --timeout 30 --user-agent "MyBot/1.0"
+.venv/bin/python -m web_agent fetch <url> --timeout 30 --user-agent "MyBot/1.0"
 ```
 
 Result shape (uniform across engines):
@@ -107,16 +113,16 @@ explicitly rather than capturing the error page as content).
 
 ```bash
 # Start a crawl — returns immediately with a job_id
-python3 -m web_agent crawl https://docs.example.com --limit 50 --depth 2
+.venv/bin/python -m web_agent crawl https://docs.example.com --limit 50 --depth 2
 
 # Poll until done. State machine: queued → running → done | cancelled | failed | orphaned
-python3 -m web_agent crawl-status j7
+.venv/bin/python -m web_agent crawl-status j7
 
 # When done, list the captured pages
-python3 -m web_agent crawl-results j7 --limit 100
+.venv/bin/python -m web_agent crawl-results j7 --limit 100
 
 # Mid-flight cancel
-python3 -m web_agent crawl-cancel j7
+.venv/bin/python -m web_agent crawl-cancel j7
 ```
 
 Defaults: same-origin (www-tolerant), respects robots.txt, seeds from sitemap.xml, 0.5s delay between fetches. Override with `--external`, `--no-robots`, `--no-sitemap`, `--delay`.

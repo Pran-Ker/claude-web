@@ -35,9 +35,11 @@ from .inspector import (
 from .inspector.query import read_handle
 from .inspector.snapshot import receipt
 from .primitives import dom
-from .scraper.fetch import fetch as scraper_fetch
-from .scraper.jobs import JobStore
 from .transport import CDPClient
+
+# Scraper imports are deferred — they pull in trafilatura/lxml/httpx, and we
+# want the inspector/browser subcommands to keep working even when those
+# heavy deps aren't installed yet (e.g. before `uv sync`).
 
 
 def _emit(payload: dict, status: int = 0) -> None:
@@ -129,8 +131,21 @@ def cmd_snapshots(args) -> None:
 # -- scraper subcommands ----------------------------------------------------
 
 
+def _require_scraper():
+    """Lazy-import the scraper, with a friendly error if deps are missing."""
+    try:
+        from .scraper.fetch import fetch as scraper_fetch, DEFAULT_USER_AGENT
+        from .scraper.jobs import JobStore
+    except ImportError as e:
+        raise WebAgentError(
+            f"Scraper dependencies not installed: {e.name or e}.",
+            hint="Run `uv sync` from the repo root, then use `.venv/bin/python -m web_agent ...`.",
+        )
+    return scraper_fetch, DEFAULT_USER_AGENT, JobStore
+
+
 def cmd_fetch(args) -> None:
-    from .scraper.fetch import DEFAULT_USER_AGENT
+    scraper_fetch, DEFAULT_USER_AGENT, _ = _require_scraper()
     ua = args.user_agent if args.user_agent is not None else DEFAULT_USER_AGENT
     result = scraper_fetch(
         args.url,
@@ -144,7 +159,7 @@ def cmd_fetch(args) -> None:
     if args.output_dir:
         out = Path(args.output_dir)
         out.mkdir(parents=True, exist_ok=True)
-        from .scraper.jobs import _slugify
+        from .scraper.jobs import _slugify  # noqa: PLC0415 — already inside scraper guard
         path = out / f"{_slugify(result.get('url') or args.url)}.md"
         path.write_text(result.get("markdown") or "")
         result["markdown_path"] = str(path)
@@ -164,7 +179,8 @@ def cmd_fetch(args) -> None:
         _emit({"ok": True, **result})
 
 
-def _job_store(args) -> JobStore:
+def _job_store(args):
+    _, _, JobStore = _require_scraper()
     return JobStore(args.crawls_dir)
 
 
