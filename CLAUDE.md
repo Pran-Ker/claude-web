@@ -50,6 +50,99 @@ python3 -m web_agent act s7 button:submit-order click
 | `page-info`                          | URL / title / viewport               |
 | `snapshots`                          | List saved snapshot ids              |
 
+### Scraper (use for read-only ingestion, NOT interactive flows)
+
+For "give me this page as clean markdown" or "crawl this site," use the
+scraper rather than driving the inspector. It's faster, doesn't need a
+running browser for most pages, and offloads bulk content to disk.
+
+| Command                                                                | Purpose                                          |
+|------------------------------------------------------------------------|--------------------------------------------------|
+| `fetch <url>`                                                          | URL → clean markdown + links + metadata          |
+| `crawl <url> [--limit N] [--depth N]`                                  | BFS site crawl, async, returns `job_id`          |
+| `crawl-status <job_id>`                                                | Returns immediately; poll in a loop until state is terminal |
+| `crawl-cancel <job_id>`                                                | Stop a crawl mid-flight                          |
+| `crawl-results <job_id> [--limit N]`                                   | List the saved page paths                        |
+| `crawl-list`                                                           | All crawl jobs                                   |
+
+#### `fetch` quick reference
+
+```bash
+# Default: auto engine (Jina → http → CDP) with intelligent escalation
+python3 -m web_agent fetch https://example.com
+
+# Force one engine
+python3 -m web_agent fetch https://example.com --engine http     # fast, no JS
+python3 -m web_agent fetch https://example.com --engine cdp      # full JS render
+python3 -m web_agent fetch https://example.com --engine jina     # hosted reader
+
+# Trim noise / capture extras
+python3 -m web_agent fetch <url> --markdown-only                 # just {url, engine, title, markdown}
+python3 -m web_agent fetch <url> --no-links                      # empty the links list
+python3 -m web_agent fetch <url> --include-html                  # add raw HTML to result
+python3 -m web_agent fetch <url> --output-dir out/               # write markdown to disk
+python3 -m web_agent fetch <url> --engine cdp --screenshot shot.jpg
+
+# Tuning
+python3 -m web_agent fetch <url> --timeout 30 --user-agent "MyBot/1.0"
+```
+
+Result shape (uniform across engines):
+
+```json
+{"ok": true, "engine": "http", "url": "...", "status": 200,
+ "title": "...", "markdown": "...", "links": ["..."],
+ "attempts": ["jina:thin", "http:ok"],
+ "description": null, "author": null, "date": null}
+```
+
+If `--engine auto` produced thin content from one engine and escalated, the
+`attempts` array shows the ladder.
+
+DNS failures, cert errors, and network failures surface as `fetch_failed`
+across all engines (the CDP path detects `chrome-error://` and raises
+explicitly rather than capturing the error page as content).
+
+#### `crawl` quick reference
+
+```bash
+# Start a crawl — returns immediately with a job_id
+python3 -m web_agent crawl https://docs.example.com --limit 50 --depth 2
+
+# Poll until done. State machine: queued → running → done | cancelled | failed | orphaned
+python3 -m web_agent crawl-status j7
+
+# When done, list the captured pages
+python3 -m web_agent crawl-results j7 --limit 100
+
+# Mid-flight cancel
+python3 -m web_agent crawl-cancel j7
+```
+
+Defaults: same-origin (www-tolerant), respects robots.txt, seeds from sitemap.xml, 0.5s delay between fetches. Override with `--external`, `--no-robots`, `--no-sitemap`, `--delay`.
+
+Pages land at `.crawls/<job_id>/pages/<slug>.json` (markdown is inside the JSON; gitignored).
+
+#### When to use which tool
+
+- **Read-only content extraction** → `fetch` or `crawl`. Don't drive the inspector for this.
+- **Form fill, login, click-to-load** → inspector (`inspect` → `query` → `act`).
+- **One-off DOM check** → `js`.
+- **Mixed: crawl a site, then interact with one page** → `crawl` to ingest, then `navigate` + `inspect` for the interactive bit.
+
+#### Errors (every error JSON has `kind` + `error` + `hint`)
+
+| `kind`                       | What it means                                              |
+|------------------------------|------------------------------------------------------------|
+| `unsupported_content_type`   | URL is a PDF/image/binary; we don't extract those          |
+| `fetch_failed`               | Network error, 4xx, or 5xx after retries                   |
+| `invalid_arguments`          | Bad URL, scheme, timeout, delay                            |
+| `snapshot_not_found`         | The `snapshot_id` doesn't exist (inspector)                |
+| `stale_handle`               | DOM mutated; re-`inspect` and retry                        |
+| `job_not_found`              | The `job_id` doesn't exist                                 |
+| `job_not_running`            | Tried to cancel a finished crawl                           |
+| `transport_error`            | CDP browser unreachable; check `python tools/browser.py list` |
+
 ### Global flags
 
 - `--port N` — CDP port (default 9222)
@@ -64,6 +157,11 @@ python3 -m web_agent act s7 button:submit-order click
 5. **One action per command.** Don't chain shell calls; check the JSON result, then decide the next call.
 
 ## Browser launch (CDP)
+
+**Required for**: every Inspector subcommand, the Browser subcommands
+(`navigate`, `screenshot`, `js`, `key`, `page-info`), and `fetch --engine cdp`
+(or `auto` falling through to CDP). The `http` and `jina` fetch engines do
+NOT need a browser.
 
 Start Chrome with the DevTools protocol enabled:
 
