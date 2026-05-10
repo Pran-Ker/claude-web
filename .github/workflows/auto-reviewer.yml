@@ -1,0 +1,49 @@
+name: Auto Reviewer
+
+# When PR CI finishes successfully, requests a review from collaborators
+# listed in the repo variable REVIEWERS (comma-separated GitHub usernames).
+# If REVIEWERS is unset, this workflow exits cleanly without doing anything.
+
+on:
+  workflow_run:
+    workflows: ["PR CI"]
+    types: [completed]
+
+jobs:
+  assign:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Request reviewers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REVIEWERS: ${{ vars.REVIEWERS }}
+        run: |
+          if [ -z "$REVIEWERS" ]; then
+            echo "REVIEWERS variable not set — skipping. Set it via:"
+            echo "  gh variable set REVIEWERS --body 'user1,user2' --repo $REPO"
+            exit 0
+          fi
+
+          PR_NUMBER=$(gh pr list --repo "$REPO" --json number,headRefOid \
+            --jq ".[] | select(.headRefOid == \"$HEAD_SHA\") | .number" | head -1)
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR found for SHA $HEAD_SHA"
+            exit 0
+          fi
+
+          # Skip if reviewers already requested
+          EXISTING=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewRequests --jq '.reviewRequests | length')
+          if [ "$EXISTING" -gt 0 ]; then
+            echo "PR #$PR_NUMBER already has reviewers requested — skipping"
+            exit 0
+          fi
+
+          echo "Requesting reviewers ($REVIEWERS) on PR #$PR_NUMBER"
+          gh pr edit "$PR_NUMBER" --repo "$REPO" --add-reviewer "$REVIEWERS"
