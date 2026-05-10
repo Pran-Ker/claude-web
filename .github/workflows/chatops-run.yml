@@ -1,0 +1,98 @@
+name: ChatOps /run
+
+# Lets repo collaborators (write/admin permission) trigger a long-running job
+# by commenting "/run" on a PR. Random outsiders are denied.
+# Customize the "Job to run" step below for whatever expensive task you want
+# (deploy preview, integration tests, perf benchmark, etc.).
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: chatops-run-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  check-trigger:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      pr_number: ${{ steps.check.outputs.pr_number }}
+    permissions:
+      pull-requests: read
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_PR_URL: ${{ github.event.issue.pull_request.html_url }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Must be a PR comment
+          if [ -z "$ISSUE_PR_URL" ]; then
+            echo "Not a PR comment — skipping"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Must contain /run as a standalone token
+          if [[ ! "$COMMENT_BODY" =~ (^|[[:space:]])/run([[:space:]]|$) ]]; then
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Must be a collaborator with write or admin
+          PERMISSION=$(gh api "repos/${REPO}/collaborators/${COMMENT_USER}/permission" --jq '.permission' 2>/dev/null || echo "none")
+          if [[ "$PERMISSION" != "admin" && "$PERMISSION" != "write" ]]; then
+            echo "User $COMMENT_USER lacks write access (has: $PERMISSION) — denied"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "pr_number=$ISSUE_NUMBER" >> $GITHUB_OUTPUT
+
+  run-job:
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: React to comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api "repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" \
+            -X POST -f content='rocket' || true
+
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ needs.check-trigger.outputs.pr_number }}/head
+
+      - name: Job to run
+        # CUSTOMIZE: replace with your expensive job (deploy preview,
+        # integration tests, benchmarks, etc.)
+        run: |
+          echo "Triggered by /run on PR #${{ needs.check-trigger.outputs.pr_number }}"
+          echo "Customize this step in .github/workflows/chatops-run.yml"
+
+      - name: Post result comment
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: chatops-run
+          number: ${{ needs.check-trigger.outputs.pr_number }}
+          message: |
+            ## /run completed
+
+            Status: ${{ job.status }}
+
+            [View run logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
