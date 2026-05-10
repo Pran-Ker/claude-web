@@ -1,0 +1,69 @@
+name: PR CI
+
+# Auto-detects language and runs tests on every PR.
+# Posts a single sticky comment that updates in place on each new push.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: pr-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect and run tests
+        id: tests
+        run: |
+          set +e
+          STATUS="passed"
+          DETAILS="no recognized build system — skipped"
+          EXIT=0
+
+          if [ -f package.json ]; then
+            DETAILS="npm test"
+            npm ci && npm test
+            EXIT=$?
+          elif [ -f pyproject.toml ] || [ -f requirements.txt ]; then
+            DETAILS="pytest"
+            pip install -e . 2>/dev/null || pip install -r requirements.txt 2>/dev/null || true
+            pip install pytest 2>/dev/null
+            pytest
+            EXIT=$?
+            # pytest exit 5 = no tests collected; treat as pass
+            [ "$EXIT" = "5" ] && EXIT=0 && DETAILS="pytest (no tests found)"
+          elif [ -f Cargo.toml ]; then
+            DETAILS="cargo test"
+            cargo test
+            EXIT=$?
+          elif [ -f go.mod ]; then
+            DETAILS="go test"
+            go test ./...
+            EXIT=$?
+          fi
+
+          [ "$EXIT" != "0" ] && STATUS="failed"
+          echo "status=$STATUS" >> $GITHUB_OUTPUT
+          echo "details=$DETAILS" >> $GITHUB_OUTPUT
+          exit $EXIT
+
+      - name: Post sticky status comment
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-ci
+          message: |
+            ## PR CI
+
+            **Status:** ${{ steps.tests.outputs.status || 'failed' }}
+            **Ran:** ${{ steps.tests.outputs.details || 'unknown' }}
+
+            [View full run logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
