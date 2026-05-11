@@ -13,6 +13,7 @@ dependencies = [
 ]
 
 [project.scripts]
+web-agent = "web_agent.cli:main"
 webagent = "web_agent.cli:main"
 
 [build-system]
