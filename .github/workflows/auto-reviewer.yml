@@ -25,7 +25,7 @@ jobs:
           REVIEWERS: ${{ vars.REVIEWERS }}
         run: |
           if [ -z "$REVIEWERS" ]; then
-            echo "REVIEWERS variable not set — skipping. Set it via:"
+            echo "REVIEWERS variable not set, skipping. Set it via:"
             echo "  gh variable set REVIEWERS --body 'user1,user2' --repo $REPO"
             exit 0
           fi
@@ -41,7 +41,7 @@ jobs:
           # Skip if reviewers already requested
           EXISTING=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json reviewRequests --jq '.reviewRequests | length')
           if [ "$EXISTING" -gt 0 ]; then
-            echo "PR #$PR_NUMBER already has reviewers requested — skipping"
+            echo "PR #$PR_NUMBER already has reviewers requested, skipping"
             exit 0
           fi
 

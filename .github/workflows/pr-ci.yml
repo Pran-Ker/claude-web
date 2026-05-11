@@ -25,7 +25,7 @@ jobs:
         run: |
           set +e
           STATUS="passed"
-          DETAILS="no recognized build system — skipped"
+          DETAILS="no recognized build system, skipped"
           EXIT=0
 
           if [ -f package.json ]; then
