@@ -92,13 +92,7 @@ class CDPClient:
     # -- JavaScript evaluation ----------------------------------------------
 
     def evaluate(self, code: str, return_by_value: bool = True) -> Any:
-        """Run JS and return the value. Raises JSExecutionError on JS exceptions.
-
-        replMode=True handles all cases without any wrapping:
-        - const/let re-declaration across calls (no "already declared" errors)
-        - top-level await without async wrapper
-        - completion value (last expression returned without explicit return)
-        """
+        """Run JS and return the value. Raises JSExecutionError on JS exceptions."""
         result = self.cmd(
             "Runtime.evaluate",
             {"expression": code, "returnByValue": return_by_value, "awaitPromise": True, "replMode": True},
