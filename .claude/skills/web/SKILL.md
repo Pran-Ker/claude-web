@@ -52,9 +52,9 @@ web-agent crawl-cancel <job_id>
 ## CDP browser (required for Inspector + `fetch --engine cdp`)
 
 ```bash
-CDP_HEADLESS=1 python3 tools/browser.py start    # repo root; auto-port 9222–9400
-python3 tools/browser.py list
-python3 tools/browser.py stop-all
+CDP_HEADLESS=1 python3 /Users/pran-ker/Tools/web-agent/tools/browser.py start    # auto-port 9222–9400
+python3 /Users/pran-ker/Tools/web-agent/tools/browser.py list
+python3 /Users/pran-ker/Tools/web-agent/tools/browser.py stop-all
 ```
 
 ## Rules

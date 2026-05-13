@@ -93,9 +93,11 @@ class CDPClient:
 
     def evaluate(self, code: str, return_by_value: bool = True) -> Any:
         """Run JS and return the value. Raises JSExecutionError on JS exceptions."""
+        has_await = "await" in code
+        expression = f"(async () => {{ return ({code}); }})()" if has_await else code
         result = self.cmd(
             "Runtime.evaluate",
-            {"expression": code, "returnByValue": return_by_value},
+            {"expression": expression, "returnByValue": return_by_value, "awaitPromise": has_await},
         )
         if "exceptionDetails" in result:
             ex = result["exceptionDetails"]
