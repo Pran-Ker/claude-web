@@ -92,9 +92,21 @@ class CDPClient:
     # -- JavaScript evaluation ----------------------------------------------
 
     def evaluate(self, code: str, return_by_value: bool = True) -> Any:
-        """Run JS and return the value. Raises JSExecutionError on JS exceptions."""
+        """Run JS and return the value. Raises JSExecutionError on JS exceptions.
+
+        Always wraps code in an IIFE so const/let declarations don't leak into
+        the shared page context and cause "already declared" errors on re-runs.
+        Single-expression code gets an implicit return; multi-statement code
+        (contains newlines or semicolons) requires an explicit return statement.
+        """
         has_await = "await" in code
-        expression = f"(async () => {{ return ({code}); }})()" if has_await else code
+        is_multi_statement = "\n" in code.strip() or ";" in code
+        if is_multi_statement:
+            body = code
+        else:
+            body = f"return ({code})"
+        fn = "async () =>" if has_await else "() =>"
+        expression = f"({fn} {{ {body} }})()"
         result = self.cmd(
             "Runtime.evaluate",
             {"expression": expression, "returnByValue": return_by_value, "awaitPromise": has_await},
