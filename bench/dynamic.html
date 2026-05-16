@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><title>Dynamic</title></head>
+<body>
+<h1>Counter</h1>
+<p>Count: <span id="count">0</span></p>
+<button id="inc" type="button" onclick="document.getElementById('count').textContent = +document.getElementById('count').textContent + 1">Increment</button>
+<button id="reset" type="button" onclick="document.getElementById('count').textContent = 0">Reset</button>
+<button id="reveal" type="button" onclick="document.getElementById('hidden').hidden = false">Reveal hidden</button>
+<div id="hidden" hidden>
+  <p>Secret panel revealed.</p>
+  <button id="confirm" type="button">Confirm</button>
+</div>
+</body></html>
