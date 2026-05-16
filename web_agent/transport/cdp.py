@@ -52,11 +52,17 @@ class CDPClient:
             )
 
         self.ws = websocket.create_connection(tabs[self.tab_index]["webSocketDebuggerUrl"])
+        # Page.enable is needed for navigate's loadEventFired waiter; the
+        # others are domain-specific and enabled lazily by their consumers.
         self.cmd("Page.enable")
-        self.cmd("DOM.enable")
-        self.cmd("Runtime.enable")
-        self.cmd("Accessibility.enable")
+        self._enabled: set[str] = {"Page"}
         return self
+
+    def enable(self, domain: str) -> None:
+        if domain in self._enabled:
+            return
+        self.cmd(f"{domain}.enable")
+        self._enabled.add(domain)
 
     def close(self) -> None:
         if self.ws:
@@ -93,6 +99,7 @@ class CDPClient:
 
     def evaluate(self, code: str, return_by_value: bool = True) -> Any:
         """Run JS and return the value. Raises JSExecutionError on JS exceptions."""
+        self.enable("Runtime")
         result = self.cmd(
             "Runtime.evaluate",
             {"expression": code, "returnByValue": return_by_value, "awaitPromise": True, "replMode": True},
@@ -117,8 +124,29 @@ class CDPClient:
     # -- helpers used by primitives -----------------------------------------
 
     def navigate(self, url: str, wait_seconds: float = 2.0) -> None:
+        """Navigate and wait for Page.loadEventFired, capped at wait_seconds.
+
+        Falls back to a sleep if the websocket lib doesn't expose timeouts.
+        """
         self.cmd("Page.navigate", {"url": url})
-        time.sleep(wait_seconds)
+        if not self.ws or wait_seconds <= 0:
+            return
+        deadline = time.monotonic() + wait_seconds
+        prev_timeout = self.ws.gettimeout()
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self.ws.settimeout(remaining)
+                try:
+                    msg = json.loads(self.ws.recv())
+                except Exception:
+                    return  # timeout or socket hiccup — caller still proceeds
+                if msg.get("method") == "Page.loadEventFired":
+                    return
+        finally:
+            self.ws.settimeout(prev_timeout)
 
     def screenshot_bytes(self, quality: int = 80, fmt: str = "jpeg") -> bytes:
         import base64
@@ -131,6 +159,7 @@ class CDPClient:
 
     def get_box_for_backend_id(self, backend_node_id: int) -> dict | None:
         try:
+            self.enable("DOM")
             box = self.cmd("DOM.getBoxModel", {"backendNodeId": backend_node_id})
         except TransportError:
             return None
@@ -148,21 +177,23 @@ class CDPClient:
         self.cmd("Input.dispatchKeyEvent", {"type": "keyUp", "key": key})
 
     def type_text(self, text: str) -> None:
-        for ch in text:
-            self.cmd("Input.dispatchKeyEvent", {"type": "char", "text": ch})
+        # Input.insertText sends the whole string in one round-trip rather
+        # than one CDP call per character.
+        if not text:
+            return
+        self.cmd("Input.insertText", {"text": text})
 
     def focus_backend_id(self, backend_node_id: int) -> bool:
         try:
+            self.enable("DOM")
             self.cmd("DOM.focus", {"backendNodeId": backend_node_id})
             return True
         except TransportError:
             return False
 
     def page_info(self) -> dict:
-        return {
-            "url": self.evaluate("window.location.href"),
-            "title": self.evaluate("document.title"),
-            "viewport": self.evaluate(
-                "[window.innerWidth, window.innerHeight]"
-            ),
-        }
+        info = self.evaluate(
+            "({url: location.href, title: document.title, "
+            "viewport: [innerWidth, innerHeight]})"
+        )
+        return info or {"url": None, "title": None, "viewport": None}
