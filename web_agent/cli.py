@@ -99,7 +99,76 @@ def cmd_act(args) -> None:
 
 def cmd_navigate(args) -> None:
     with _client(args) as client:
-        _emit(dom.navigate(client, args.url, wait_seconds=args.wait))
+        info = dom.navigate(client, args.url, wait_seconds=args.wait)
+        payload = dict(info)
+        if args.snap:
+            # Verify the page actually loaded the URL we asked for. Concurrent
+            # navigations on the same tab can race the snapshot capture.
+            live = client.page_info()
+            payload["url"] = live.get("url")
+            payload["title"] = live.get("title")
+            snap = capture_snapshot(client)
+            sid = _store(args).save(snap)
+            snap["id"] = sid
+            payload["snapshot"] = receipt(snap)
+            if args.url and live.get("url") and not live["url"].startswith(args.url.split("#")[0]):
+                payload["warning"] = (
+                    f"Loaded URL {live.get('url')!r} differs from requested {args.url!r} — "
+                    "another navigation may have raced on this tab."
+                )
+    _emit(payload)
+
+
+def cmd_batch(args) -> None:
+    """Run a JSON list of ops in one CLI call.
+
+    Accepts ops either inline (``web-agent batch '<json>'``) or via stdin
+    (``... | web-agent batch -``). One CDP connection serves all ops.
+    """
+    from .batch import run_batch
+    if args.ops_json == "-":
+        payload = sys.stdin.read()
+    else:
+        payload = args.ops_json
+    try:
+        ops = json.loads(payload)
+    except json.JSONDecodeError as e:
+        raise InvalidArguments(
+            f"Could not parse batch JSON: {e}",
+            hint='Pass a JSON array, e.g. \'[{"op":"navigate","url":"..."}]\'.',
+        )
+    if not isinstance(ops, list):
+        raise InvalidArguments(
+            "Batch payload must be a JSON array.",
+            hint='Wrap a single op in brackets: \'[{"op":"page_info"}]\'.',
+        )
+    with _client(args) as client:
+        result = run_batch(client, _store(args), ops)
+    _emit(result, status=0 if result.get("ok") else 2)
+
+
+def cmd_find(args) -> None:
+    """Compound: inspect + query in a single CLI call.
+
+    Saves one agent round-trip vs. running `inspect` and then `query`. The
+    returned snapshot id is reusable for subsequent `act` calls.
+    """
+    with _client(args) as client:
+        snap = capture_snapshot(client)
+    sid = _store(args).save(snap)
+    snap["id"] = sid
+    out = query_snapshot(
+        snap,
+        role=args.role,
+        name_contains=args.name,
+        tag=args.tag,
+        text_contains=args.text,
+        visible_only=not args.all_visibility,
+        scope_selector=args.scope_selector,
+        limit=args.limit,
+    )
+    out["snapshot_id"] = sid
+    _emit(out)
 
 
 def cmd_screenshot(args) -> None:
@@ -338,7 +407,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("navigate", help="Load a URL")
     sp.add_argument("url")
     sp.add_argument("--wait", type=float, default=2.0)
+    sp.add_argument("--snap", action="store_true",
+                    help="Capture a snapshot after load and include it in the response (saves an LLM turn)")
     sp.set_defaults(fn=cmd_navigate)
+
+    sp = sub.add_parser("batch", help="Run a JSON list of ops in one CLI call (saves N agent turns)")
+    sp.add_argument("ops_json", help="JSON array of ops, or '-' to read from stdin")
+    sp.set_defaults(fn=cmd_batch)
+
+    sp = sub.add_parser("find", help="inspect + query in one call (returns snapshot_id)")
+    sp.add_argument("--role")
+    sp.add_argument("--name", help="substring match against accessible name")
+    sp.add_argument("--text", help="substring match across name/value/description")
+    sp.add_argument("--tag")
+    sp.add_argument("--scope-selector", help="substring match against the element's selector")
+    sp.add_argument("--all-visibility", action="store_true", help="include hidden elements")
+    sp.add_argument("--limit", type=int, default=20)
+    sp.set_defaults(fn=cmd_find)
 
     sp = sub.add_parser("screenshot", help="Save a JPEG screenshot")
     sp.add_argument("path")
