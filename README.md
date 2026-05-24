@@ -9,18 +9,10 @@ Connect Claude Code to a real browser and a clean scraper. Ask it to fill forms,
 ## Install (⏱ < 1 min)
 
 ```bash
-# 1. Clone
-git clone https://github.com/agi-inc/claude-web.git
-cd claude-web
-
-# 2. Install the CLI globally (editable — edits in this repo take effect immediately)
-uv tool install --editable .
-
-# 3. Wire the skill into Claude Code so /web works in any project
-ln -s "$(pwd)/.claude/skills/web" ~/.claude/skills/web
+curl -fsSL https://raw.githubusercontent.com/agi-inc/claude-web/main/install.sh | sh
 ```
 
-That's it. `web-agent` is now on your PATH and Claude Code's `/web` skill is live.
+That's it. `web-agent` is on your PATH and Claude Code's `/web` skill is live.
 
 Verify:
 
@@ -29,6 +21,13 @@ web-agent fetch https://example.com --markdown-only
 ```
 
 You should get a JSON object with the page title and markdown.
+
+**What the installer does** (clones to `~/Tools/claude-web` by default, override with `CLAUDE_WEB_DIR=/your/path sh`):
+1. Clones (or updates) the repo
+2. Installs `web-agent` globally via `uv tool install --editable .`
+3. Symlinks the `/web` skill into `~/.claude/skills/web`
+
+> **Prerequisites**: [`uv`](https://docs.astral.sh/uv/getting-started/installation/) and `git` must be on your PATH. If you don't have `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ---
 

@@ -52,9 +52,9 @@ web-agent crawl-cancel <job_id>
 ## CDP browser (required for Inspector + `fetch --engine cdp`)
 
 ```bash
-CDP_HEADLESS=1 python3 /Users/pran-ker/Tools/web-agent/tools/browser.py start    # auto-port 9222–9400
-python3 /Users/pran-ker/Tools/web-agent/tools/browser.py list
-python3 /Users/pran-ker/Tools/web-agent/tools/browser.py stop-all
+CDP_HEADLESS=1 python3 "$(python3 -c 'import web_agent, pathlib; print(pathlib.Path(web_agent.__file__).parent.parent / "tools" / "browser.py")')" start    # auto-port 9222–9400
+python3 "$(python3 -c 'import web_agent, pathlib; print(pathlib.Path(web_agent.__file__).parent.parent / "tools" / "browser.py")')" list
+python3 "$(python3 -c 'import web_agent, pathlib; print(pathlib.Path(web_agent.__file__).parent.parent / "tools" / "browser.py")')" stop-all
 ```
 
 ## Rules
