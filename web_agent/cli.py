@@ -414,9 +414,32 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _hoist_global_flags(argv: list[str]) -> list[str]:
+    """Allow --port/--snapshots-dir/--crawls-dir anywhere in argv, not just before the subcommand."""
+    global_flags = {"--port", "--snapshots-dir", "--crawls-dir"}
+    hoisted: list[str] = []
+    rest: list[str] = []
+    i = 0
+    subcommand_seen = False
+    while i < len(argv):
+        arg = argv[i]
+        flag = arg.split("=")[0]
+        if not subcommand_seen and not arg.startswith("-"):
+            subcommand_seen = True
+        if subcommand_seen and flag in global_flags:
+            hoisted.append(arg)
+            if "=" not in arg and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                i += 1
+                hoisted.append(argv[i])
+        else:
+            rest.append(arg)
+        i += 1
+    return hoisted + rest
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(_hoist_global_flags(argv if argv is not None else sys.argv[1:]))
     try:
         args.fn(args)
     except WebAgentError as e:
