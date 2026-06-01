@@ -55,6 +55,7 @@ web-agent act s7 button:submit-order click
 | `screenshot <path> [--quality N]`    | Save a JPEG                          |
 | `js <code>`                          | Evaluate JS, return the value        |
 | `key <Tab\|Enter\|Escape\|...>`      | Send a global keystroke              |
+| `paste (--html H \| --html-file P) [--text T] [--no-trigger]` | Rich-clipboard trusted paste into the focused editor (canvas/contenteditable apps). See `web_agent/tools/AGENTS.md`. |
 | `page-info`                          | URL / title / viewport               |
 | `snapshots`                          | List saved snapshot ids              |
 
