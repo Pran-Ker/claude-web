@@ -118,6 +118,11 @@ def cmd_key(args) -> None:
 
 
 def cmd_paste(args) -> None:
+    if args.html is not None and args.html_file is not None:
+        raise InvalidArguments(
+            "Pass either --html or --html-file, not both.",
+            hint="Choose one source for the clipboard HTML.",
+        )
     html = args.html
     if args.html_file:
         html = Path(args.html_file).read_text()
