@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><title>Bench</title></head>
+<body>
+<h1 id="hdr">Latency Bench</h1>
+<form>
+  <label>Email <input id="email" type="email" name="email" placeholder="you@x.com"></label>
+  <label>Pw <input id="pw" type="password" name="pw"></label>
+  <button id="submit" type="button">Submit</button>
+</form>
+<nav>
+<script>
+// Pad the page with many interactive elements so the AX tree is non-trivial.
+const n = document.querySelector('nav');
+for (let i = 0; i < 120; i++) {
+  const a = document.createElement('a');
+  a.href = '#' + i; a.textContent = 'link-' + i; a.id = 'link-' + i;
+  n.appendChild(a);
+}
+</script>
+</nav>
+</body></html>

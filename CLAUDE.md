@@ -21,20 +21,31 @@
 ## The standard loop
 
 ```bash
-# 1. Land on the page
-web-agent navigate "https://example.com/checkout"
+# FASTEST path — `batch` runs N ops in ONE CLI call (one LLM turn).
+# Use this whenever you can predict the sequence ahead of time.
+web-agent batch '[
+  {"op":"navigate","url":"https://example.com/checkout"},
+  {"op":"fill", "find":{"role":"textbox","name":"Email"},   "text":"x@y.com"},
+  {"op":"fill", "find":{"role":"textbox","name":"Password"},"text":"hunter2"},
+  {"op":"click","find":{"role":"button", "name":"Submit"}}
+]'
+# → {"ok": true, "steps": [...], "snapshot_id": "s7"}
 
-# 2. Snapshot — receipt comes back; full data goes to .snapshots/
-web-agent inspect
-# → {"inspect_id": "s7", "total_elements": 142, "top_roles": {...}, "hint": "..."}
-
-# 3. Query against the snapshot id (NOT the live page)
-web-agent query s7 --role button --name submit
-# → {"matches": [{"handle": "button:submit-order", ...}], "total": 1}
-
-# 4. Act using the readable handle
+# Slower path — one CLI call per LLM turn. Use only when later actions
+# depend on JSON output you haven't seen yet.
+web-agent find --role button --name submit         # inspect + query in one call
 web-agent act s7 button:submit-order click
 ```
+
+`batch` auto-manages snapshots and auto-retries `stale_handle` once, so
+intermediate DOM mutations don't require manual recovery. Use it whenever
+the plan is fixed; reach for individual commands only when you must
+inspect output before deciding the next step.
+
+**Re-inspect rule.** Snapshots are durable. `act` results include
+`snapshot_id` — keep using that id for the next `act` unless you get a
+`stale_handle` error. Re-inspecting between every action wastes a full
+agent turn (~3–6s of LLM time) per skip.
 
 ## Subcommand reference
 
