@@ -16,6 +16,12 @@ dependencies = [
 web-agent = "web_agent.cli:main"
 webagent = "web_agent.cli:main"
 
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

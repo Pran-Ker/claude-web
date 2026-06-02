@@ -117,6 +117,24 @@ def cmd_key(args) -> None:
         _emit(dom.press_key(client, args.key))
 
 
+def cmd_paste(args) -> None:
+    if args.html is not None and args.html_file is not None:
+        raise InvalidArguments(
+            "Pass either --html or --html-file, not both.",
+            hint="Choose one source for the clipboard HTML.",
+        )
+    html = args.html
+    if args.html_file:
+        html = Path(args.html_file).read_text()
+    if html is None:
+        raise InvalidArguments(
+            "Provide content with --html or --html-file.",
+            hint='e.g. web-agent paste --html "<b>hi</b>"',
+        )
+    with _client(args) as client:
+        _emit(dom.paste_rich(client, html=html, text=args.text, trigger=not args.no_trigger))
+
+
 def cmd_page_info(args) -> None:
     with _client(args) as client:
         _emit({"ok": True, **client.page_info()})
@@ -352,6 +370,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("key", help="Press a key (Tab, Enter, Escape, ...)")
     sp.add_argument("key")
     sp.set_defaults(fn=cmd_key)
+
+    sp = sub.add_parser(
+        "paste",
+        help="Put rich HTML on the clipboard and trigger a trusted paste into the focused element",
+    )
+    sp.add_argument("--html", default=None, help="HTML content for the text/html clipboard flavor")
+    sp.add_argument("--html-file", default=None, help="Read the HTML content from this file instead")
+    sp.add_argument("--text", default=None, help="Plain-text flavor (defaults to tag-stripped HTML)")
+    sp.add_argument("--no-trigger", action="store_true",
+                    help="Only load the clipboard; don't dispatch the paste keystroke")
+    sp.set_defaults(fn=cmd_paste)
 
     sp = sub.add_parser("page-info", help="URL, title, viewport")
     sp.set_defaults(fn=cmd_page_info)

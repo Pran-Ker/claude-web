@@ -3,7 +3,7 @@
 You have two logical tools, both invoked via the same CLI:
 
 - **Inspector** — `inspect`, `query`, `read`, `act`
-- **Browser** — `navigate`, `screenshot`, `js`, `key`, `page-info`, `snapshots`
+- **Browser** — `navigate`, `screenshot`, `js`, `key`, `paste`, `page-info`, `snapshots`
 
 Every command prints one JSON object to stdout. Read it; don't grep it.
 
@@ -45,6 +45,42 @@ python -m web_agent act s7 button:submit-order click
 | `fill --text X`   | focuses the field, selects all, types X          |
 | `focus`           | focus only (no click)                            |
 | `scroll_into_view`| ensures the element is on screen                 |
+
+## Pasting rich content into canvas apps (`paste`)
+
+Google Docs/Sheets, Notion, Figma render to `<canvas>` and reject synthetic JS
+paste events (`isTrusted` check). `paste` inserts formatted content (bold,
+highlight, tables) entirely inside the browser — no `osascript`, no OS clipboard
+juggling, no select-all→delete→paste race:
+
+```bash
+# 1. Focus the editor first — the caret must be inside it
+python -m web_agent act s1 <editor-handle> click
+
+# 2. Paste rich HTML (text/html flavor; plain-text is auto-derived)
+python -m web_agent paste --html '<p><b>Q2</b></p><table border="1"><tr><td>Rev</td><td>$4M</td></tr></table>'
+#    or from a file:  python -m web_agent paste --html-file report.html
+
+# 3. Re-inspect / screenshot to confirm it landed
+python -m web_agent inspect
+```
+
+How it works: grants clipboard perms (`Browser.grantPermissions`), fakes focus
+(`Emulation.setFocusEmulationEnabled`, so no window pops up), writes
+`text/html`+`text/plain` via `navigator.clipboard.write`, then dispatches a
+trusted `Paste` editing command (`Input.dispatchKeyEvent` with `commands:["Paste"]`).
+
+- **Requires a HEADED browser.** The headless clipboard does not round-trip, so
+  the paste silently no-ops. This is the one flow that needs the window open.
+- **Focus the editor first.** `paste` lands in whatever is focused. It guards
+  against the common mistake: if no editable element is focused it returns
+  `dispatched: false` + `editable_target: false` (and leaves the OS clipboard
+  untouched) instead of silently no-opping. Click into the editor, then re-run.
+- **Not idempotent.** Re-running `paste` appends the content again. The result's
+  `dispatched: true` means the keystroke was sent, NOT that content landed —
+  re-inspect/screenshot to confirm.
+- **Overwrites the OS clipboard** (only when it actually pastes).
+- `--no-trigger` loads the clipboard without dispatching the paste keystroke.
 
 ## When something fails
 

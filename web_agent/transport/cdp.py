@@ -9,6 +9,8 @@ Replaces the legacy ``tools/web_tool.py``. Differences:
 from __future__ import annotations
 
 import json
+import re
+import sys
 import time
 from typing import Any
 
@@ -157,6 +159,111 @@ class CDPClient:
             return True
         except TransportError:
             return False
+
+    # -- rich clipboard + trusted paste -------------------------------------
+    #
+    # Lets us insert formatted content (tables, bold, highlight) into apps that
+    # render to <canvas> and reject synthetic events — Google Docs, Sheets,
+    # Figma, etc. The whole flow stays inside the browser process:
+    #   1. grant clipboard permission over CDP (no OS prompt),
+    #   2. write text/html via the page's own navigator.clipboard.write,
+    #   3. dispatch a *trusted* Paste editing command through the CDP input
+    #      pipeline. No osascript, no OS clipboard, no window focus race.
+
+    def grant_clipboard(self) -> None:
+        """Grant clipboard read/write so navigator.clipboard works without a prompt."""
+        for perms in (
+            ["clipboardReadWrite", "clipboardSanitizedWrite"],
+            ["clipboardReadWrite"],
+            ["clipboardRead", "clipboardWrite"],
+        ):
+            try:
+                self.cmd("Browser.grantPermissions", {"permissions": perms})
+                return
+            except TransportError:
+                continue
+        # Permission grant is best-effort; clipboard.write may still work if the
+        # origin was previously granted by the user.
+
+    def set_focus_emulation(self, enabled: bool = True) -> None:
+        """Make the page report itself focused *without* raising the OS window.
+
+        navigator.clipboard.write rejects with "Document is not focused" when the
+        tab is backgrounded. This satisfies that requirement while keeping the
+        browser exactly where it is — no window pops to the foreground.
+        """
+        try:
+            self.cmd("Emulation.setFocusEmulationEnabled", {"enabled": enabled})
+        except TransportError:
+            pass
+
+    def set_clipboard_rich(self, html: str, text: str | None = None) -> None:
+        """Write text/html (+ text/plain) to the clipboard via the page's API."""
+        if text is None:
+            # Cheap tag-strip so the plain-text flavor isn't empty.
+            text = re.sub(r"<[^>]+>", "", html)
+            text = re.sub(r"\s+\n", "\n", text).strip()
+        expr = (
+            "(async () => {"
+            f"  const html = {json.dumps(html)};"
+            f"  const text = {json.dumps(text)};"
+            "  const item = new ClipboardItem({"
+            "    'text/html': new Blob([html], {type: 'text/html'}),"
+            "    'text/plain': new Blob([text], {type: 'text/plain'}),"
+            "  });"
+            "  await navigator.clipboard.write([item]);"
+            "  return true;"
+            "})()"
+        )
+        self.evaluate(expr)
+
+    def focused_editable(self) -> dict:
+        """Report whether the currently focused element can receive a paste.
+
+        Returns ``{editable: bool, descriptor: str}``. ``descriptor`` is a short
+        ``tag#id`` label for the active element, for use in hints.
+
+        Note: canvas editors like Google Docs delegate focus into a
+        contenteditable *iframe*, so the top-level activeElement is the
+        ``<iframe>`` itself — we treat iframes as editable (focus delegated)
+        rather than block the paste.
+        """
+        js = (
+            "(() => {"
+            "  const el = document.activeElement;"
+            "  if (!el) return {editable: false, descriptor: 'none'};"
+            "  const tag = el.tagName.toLowerCase();"
+            "  let editable = !!el.isContentEditable || tag === 'textarea' || tag === 'iframe';"
+            "  if (tag === 'input') {"
+            "    const t = (el.getAttribute('type') || 'text').toLowerCase();"
+            "    editable = ['text','search','url','tel','email','password','number',''].includes(t);"
+            "  }"
+            "  const id = el.id ? ('#' + el.id) : '';"
+            "  return {editable, descriptor: tag + id + (tag === 'iframe' ? ' (focus delegated)' : '')};"
+            "})()"
+        )
+        result = self.evaluate(js)
+        if not isinstance(result, dict):
+            return {"editable": False, "descriptor": "unknown"}
+        return result
+
+    def trusted_paste(self) -> None:
+        """Dispatch a trusted Paste editing command into the focused element.
+
+        Uses the CDP input pipeline with an explicit ``commands: ["Paste"]`` so
+        Chromium executes the editor Paste command directly — bypassing keycode
+        mapping and the isTrusted checks that reject JS-dispatched paste events.
+        """
+        modifier = 4 if sys.platform == "darwin" else 2  # Meta on macOS, else Ctrl
+        base = {
+            "key": "v",
+            "code": "KeyV",
+            "windowsVirtualKeyCode": 86,
+            "nativeVirtualKeyCode": 86,
+            "modifiers": modifier,
+        }
+        self.cmd("Input.dispatchKeyEvent", {"type": "rawKeyDown", "commands": ["Paste"], **base})
+        self.cmd("Input.dispatchKeyEvent", {"type": "keyUp", **base})
 
     def page_info(self) -> dict:
         return {
