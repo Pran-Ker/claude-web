@@ -34,7 +34,9 @@ Handles are readable: `button:submit-order`, `textbox:email`, `link:about-2`.
 
 ## Browser (escape hatches)
 
-`navigate <url>`, `screenshot <path>`, `js <code>`, `key <Tab|Enter|...>`, `page-info`, `snapshots`.
+`navigate <url>`, `screenshot <path>`, `js <code>`, `key <Tab|Enter|...>`, `paste`, `page-info`, `snapshots`.
+
+`paste (--html H | --html-file P) [--text T] [--no-trigger]` — put rich HTML on the clipboard and fire a **trusted** paste into the focused editor (canvas apps: Google Docs/Sheets, Notion, Figma). Focus the editor first; headed browser only; not idempotent. See `web_agent/tools/AGENTS.md`.
 
 ## Scraper
 
