@@ -15,6 +15,7 @@ from typing import Dict, List, Optional
 # ────────────────── configuration ──────────────────
 DEFAULT_PORT = 9222
 DEFAULT_HEADLESS = False
+DEFAULT_PROFILE = 'persist'
 CHROME_PATHS = [
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/usr/bin/google-chrome',
@@ -152,7 +153,7 @@ def list_pidfile_ports() -> List[int]:
 class BrowserCDP:
     """Single Chrome instance controlled via CDP."""
 
-    def __init__(self, port: int = DEFAULT_PORT, headless: bool = DEFAULT_HEADLESS, profile: Optional[str] = None):
+    def __init__(self, port: int = DEFAULT_PORT, headless: bool = DEFAULT_HEADLESS, profile: Optional[str] = DEFAULT_PROFILE):
         self.port = port
         self.headless = headless
         self.profile = profile  # "persist" = ~/.chrome-cdp-profile, path = custom, None = /tmp throwaway
@@ -231,7 +232,7 @@ class MultiBrowserManager:
     def __init__(self):
         self._browsers: Dict[int, BrowserCDP] = {}
 
-    def start(self, port: Optional[int] = None, headless: bool = DEFAULT_HEADLESS, profile: Optional[str] = None) -> str:
+    def start(self, port: Optional[int] = None, headless: bool = DEFAULT_HEADLESS, profile: Optional[str] = DEFAULT_PROFILE) -> str:
         # Choose a port
         if port is None:
             port = find_free_port()
@@ -284,7 +285,7 @@ if __name__ == "__main__":
     if cmd == "start":
         # Env: CDP_PORT=auto|<int>, CDP_COUNT=N, CDP_HEADLESS=1/0, CDP_RANGE=9222-9400, CDP_PROFILE=persist|<path>
         headless = _env_bool("CDP_HEADLESS", DEFAULT_HEADLESS)
-        profile = _env("CDP_PROFILE")  # "persist" or a custom path; unset = throwaway /tmp dir
+        profile = _env("CDP_PROFILE", DEFAULT_PROFILE)  # "persist" or a custom path; unset = DEFAULT_PROFILE
         count = int(_env("CDP_COUNT", "1"))
         range_env = _env("CDP_RANGE")
         if range_env and '-' in range_env:

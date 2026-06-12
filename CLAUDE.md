@@ -1,5 +1,23 @@
 # CLAUDE.md — Web Agent Automation Guide
 
+A CLI-driven browser automation toolkit (`web-agent`) exposing Inspector, Browser, and Scraper tools for agents.
+
+**Status**: active (last commit 2026-06-01)
+
+## Run
+
+```bash
+uv tool install --editable .   # one-time setup; puts `web-agent` on PATH
+web-agent fetch https://example.com          # scrape a page to markdown
+CDP_HEADLESS=1 python3 tools/browser.py start # launch the CDP browser for Inspector/Browser commands
+```
+
+## Layout
+
+- `web_agent/`: the package (CLI entry point plus `tools/` with the AGENTS.md playbook and manifest.json contract).
+- `tools/`: legacy `web_tool.py` surface and `browser.py` (CDP launcher).
+- `tests/`, `bench/`, `assets/`: tests, benchmarks, fixtures.
+
 > **The agent surface is the `web-agent` CLI binary** (installed globally via
 > `uv tool install --editable .` from this repo root). All commands below use it.
 > One CLI exposes three logical tools — Inspector, Browser, Scraper — via

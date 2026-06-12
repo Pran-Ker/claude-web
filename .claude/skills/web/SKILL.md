@@ -1,5 +1,6 @@
 ---
 name: web
+category: tools
 description: Drive a real browser via `web-agent` CLI. Use for browsing, clicking, form-filling, login, scraping pages to markdown, or crawling sites. Inspector for interaction, Scraper for read-only content.
 argument-hint: [task or URL]
 ---
